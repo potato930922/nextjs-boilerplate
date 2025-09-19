@@ -1,3 +1,5 @@
+export const runtime = 'nodejs';
+
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verify } from '@/lib/auth';
@@ -12,17 +14,21 @@ const bodySchema = z.object({
   actor: z.string().min(1),
 });
 
-export async function POST(req: NextRequest, { params }: { params: { rowId: string }}) {
+export async function POST(
+  req: NextRequest,
+  context: { params: Promise<{ rowId: string }> }
+) {
   const token = req.cookies.get('s_token')?.value;
-  if (!token) return NextResponse.json({ ok:false, error:'unauth' }, { status: 401 });
+  if (!token) return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
   const payload = await verify(token).catch(() => null);
-  if (!payload) return NextResponse.json({ ok:false, error:'forbidden' }, { status: 403 });
+  if (!payload) return NextResponse.json({ ok: false, error: 'forbidden' }, { status: 403 });
 
+  const { rowId } = await context.params;
   const { selected_idx, baedaji, skip, delete: del, expected_version, actor } =
     bodySchema.parse(await req.json());
 
   const { data, error } = await supabaseAdmin.rpc('save_row', {
-    p_row_id: Number(params.rowId),
+    p_row_id: Number(rowId),
     p_selected_idx: selected_idx,
     p_baedaji: baedaji,
     p_skip: skip,
@@ -31,8 +37,8 @@ export async function POST(req: NextRequest, { params }: { params: { rowId: stri
     p_actor: actor,
   });
 
-  if (error) return NextResponse.json({ ok:false, error:'db' }, { status: 500 });
-  if (data === -1) return NextResponse.json({ ok:false, error:'version_conflict' }, { status: 409 });
+  if (error) return NextResponse.json({ ok: false, error: 'db' }, { status: 500 });
+  if (data === -1) return NextResponse.json({ ok: false, error: 'version_conflict' }, { status: 409 });
 
-  return NextResponse.json({ ok:true, new_version: data });
+  return NextResponse.json({ ok: true, new_version: data });
 }
