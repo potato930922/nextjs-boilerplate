@@ -1,6 +1,7 @@
 // lib/auth.ts
 import { createSigner, createVerifier } from 'fast-jwt';
 import { createHash } from 'crypto';
+export { verifyToken as verify };
 
 const JWT_SECRET = process.env.JWT_SECRET!;
 if (!JWT_SECRET) throw new Error('Missing env JWT_SECRET');
