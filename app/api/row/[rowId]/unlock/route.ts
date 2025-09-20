@@ -1,21 +1,22 @@
-export const runtime = 'nodejs';
-
+// app/api/row/[rowId]/unlock/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { verify } from '@/lib/auth';
+import { verifyToken } from '@/lib/auth';
+import { cookies } from 'next/headers';
 
 export async function POST(
-  req: NextRequest,
-  context: { params: Promise<{ rowId: string }> }
+  _req: NextRequest,
+  { params }: { params: { rowId: string } }
 ) {
-  const token = req.cookies.get('s_token')?.value;
-  if (!token) return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
-  const payload = await verify(token).catch(() => null);
-  if (!payload) return NextResponse.json({ ok: false, error: 'forbidden' }, { status: 403 });
+  const token = (await cookies()).get('s_token')?.value;
+  const payload = verifyToken(token);
+  if (!payload) return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
 
-  const { rowId } = await context.params;
+  const rowId = Number(params.rowId);
 
-  const { error } = await supabaseAdmin.rpc('release_lock', { p_row_id: Number(rowId) });
-  if (error) return NextResponse.json({ ok: false, error: 'db' }, { status: 500 });
+  const { error } = await supabaseAdmin.from('locks').delete().eq('row_id', rowId);
+  if (error) {
+    return NextResponse.json({ ok: false, error: 'db_error' }, { status: 500 });
+  }
   return NextResponse.json({ ok: true });
 }
