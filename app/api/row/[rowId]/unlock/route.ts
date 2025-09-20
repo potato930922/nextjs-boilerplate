@@ -6,17 +6,14 @@ import { cookies } from 'next/headers';
 
 export async function POST(
   _req: NextRequest,
-  { params }: { params: { rowId: string } }
+  { params }: { params: Promise<{ rowId: string }> }
 ) {
+  const { rowId } = await params;
   const token = (await cookies()).get('s_token')?.value;
   const payload = verifyToken(token);
   if (!payload) return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
 
-  const rowId = Number(params.rowId);
-
-  const { error } = await supabaseAdmin.from('locks').delete().eq('row_id', rowId);
-  if (error) {
-    return NextResponse.json({ ok: false, error: 'db_error' }, { status: 500 });
-  }
+  const { error } = await supabaseAdmin.from('locks').delete().eq('row_id', Number(rowId));
+  if (error) return NextResponse.json({ ok: false, error: 'db_error' }, { status: 500 });
   return NextResponse.json({ ok: true });
 }
