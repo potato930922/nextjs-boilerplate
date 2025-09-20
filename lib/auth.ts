@@ -1,12 +1,26 @@
+// lib/auth.ts
 import { createSigner, createVerifier } from 'fast-jwt';
-import crypto from 'crypto';
+import { createHash } from 'crypto';
 
-const secret = process.env.SESSION_JWT_SECRET!;
-const pinSalt = process.env.PIN_SALT!;
+const JWT_SECRET = process.env.JWT_SECRET!;
+if (!JWT_SECRET) throw new Error('Missing env JWT_SECRET');
 
-export const sign = createSigner({ key: secret, expiresIn: '7d' });
-export const verify = createVerifier({ key: secret });
+export const sign = createSigner({
+  key: JWT_SECRET,
+  expiresIn: '7d',
+});
+
+const _verify = createVerifier({ key: JWT_SECRET }); // 동기
+export function verifyToken(token?: string | null) {
+  if (!token) return null;
+  try {
+    return _verify(token) as { session_id: string };
+  } catch {
+    return null;
+  }
+}
 
 export function hashPin(pin: string) {
-  return crypto.createHash('sha256').update(pinSalt + pin).digest('hex');
+  const salt = process.env.PIN_SALT || '';
+  return createHash('sha256').update(salt + pin).digest('hex');
 }
