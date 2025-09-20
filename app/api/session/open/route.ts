@@ -6,42 +6,46 @@ import { z } from 'zod';
 
 const bodySchema = z.object({
   session_id: z.string().min(1),
-  pin: z.string().min(1),
+  title: z.string().optional(),
+  pin: z.string().min(4).max(12),
 });
 
 export async function POST(req: NextRequest) {
-  const json = await req.json().catch(() => null);
-  const parsed = bodySchema.safeParse(json);
-  if (!parsed.success) {
+  const body = await req.json().catch(() => ({}));
+  const parse = bodySchema.safeParse(body);
+  if (!parse.success) {
     return NextResponse.json({ ok: false, error: 'bad_request' }, { status: 400 });
   }
-  const { session_id, pin } = parsed.data;
+  const { session_id, title, pin } = parse.data;
 
-  const { data, error } = await supabaseAdmin
+  // 세션 upsert
+  const { error } = await supabaseAdmin
     .from('sessions')
-    .select('pin_hash, status')
-    .eq('session_id', session_id)
-    .single();
-
-  if (error || !data) {
-    return NextResponse.json({ ok: false, error: 'not_found' }, { status: 404 });
-  }
-  if (data.status !== 'active') {
-    return NextResponse.json({ ok: false, error: 'closed' }, { status: 403 });
-  }
-
-  const ok = data.pin_hash === hashPin(pin);
-  if (!ok) {
-    return NextResponse.json({ ok: false, error: 'pin_mismatch' }, { status: 401 });
+    .upsert(
+      {
+        session_id,
+        title: title ?? null,
+        pin_hash: hashPin(pin),
+        status: 'active',
+      },
+      { onConflict: 'session_id' }
+    );
+  if (error) {
+    return NextResponse.json({ ok: false, error: 'db_error' }, { status: 500 });
   }
 
-  const token = signToken({ session_id });
+  // ✅ 토큰은 반드시 await
+  const token = await signToken({ session_id });
+
   const res = NextResponse.json({ ok: true });
-  res.cookies.set('s_token', token, {
+  // ✅ 객체 형태로 설정 (타입 안전)
+  res.cookies.set({
+    name: 's_token',
+    value: token,
     httpOnly: true,
     secure: true,
     sameSite: 'lax',
-    maxAge: 60 * 60 * 24 * 7,
+    maxAge: 60 * 60 * 24 * 7, // 7d
     path: '/',
   });
   return res;
