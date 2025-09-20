@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
+import dns from 'node:dns';
+import { Agent } from 'undici';
 
-export const runtime = 'nodejs';                 // Edge 금지
+export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
-// Vercel: 가까운 리전 선호(도쿄/서울). 없는 플랫폼이면 무시됨.
-export const preferredRegion = ['hnd1', 'icn1']; 
+export const preferredRegion = ['icn1', 'hnd1'] as const;
+
+// ✅ Node의 DNS 해석 순서를 IPv4 먼저로
+dns.setDefaultResultOrder('ipv4first');
 
 type Item = {
   img_url: string;
@@ -18,6 +22,12 @@ type Item = {
 const URL_LOW = 'https://taobao-advanced.p.rapidapi.com/item_image_search';
 const HOST = 'taobao-advanced.p.rapidapi.com';
 const KEY_LOW = process.env.RAPIDAPI_TAOBAO_KEY_LOW || '';
+
+// ✅ IPv4 강제용 undici Agent
+const ipv4Agent = new Agent({
+  connect: { family: 4, timeout: 20_000 },
+  keepAliveTimeout: 10_000,
+});
 
 const https = (u: string) => (u?.startsWith('//') ? `https:${u}` : (u || ''));
 
@@ -53,11 +63,8 @@ function parseItems(json: any): Item[] {
     const seller = i?.seller_nick ?? i?.nick ?? i?.seller ?? i?.shop_title ?? null;
 
     const detail =
-  i?.detail_url ??
-  i?.url ??
-  i?.detailUrl ??
-  i?.item_url ??
-  (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '');
+      i?.detail_url ?? i?.url ?? i?.detailUrl ?? i?.item_url ??
+      (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '');
 
     return {
       img_url: https(String(img)),
@@ -75,7 +82,35 @@ function parseItems(json: any): Item[] {
   return items;
 }
 
-async function callRapidLow(img: string, signal: AbortSignal) {
+async function dnsDiag(host: string) {
+  try {
+    const v4 = await new Promise<string[]>((res, rej) => dns.resolve4(host, (e, a) => e ? rej(e) : res(a)));
+    return { ok: true, v4 };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+async function pingRapidIndex() {
+  try {
+    const r = await fetch('https://taobao-advanced.p.rapidapi.com/', {
+      headers: {
+        'X-RapidAPI-Key': KEY_LOW,
+        'X-RapidAPI-Host': HOST,
+        'User-Agent': 'dalae-taobao/1.0',
+        'Accept': 'application/json',
+      },
+      cache: 'no-store',
+      // ✅ IPv4 고정
+      dispatcher: ipv4Agent,
+    });
+    return { ok: r.ok, status: r.status };
+  } catch (e: any) {
+    return { ok: false, name: e?.name, msg: e?.message, cause: e?.cause ?? null };
+  }
+}
+
+async function callRapidLow(img: string) {
   const url = `${URL_LOW}?img=${encodeURIComponent(img)}`;
   return fetch(url, {
     method: 'GET',
@@ -83,18 +118,17 @@ async function callRapidLow(img: string, signal: AbortSignal) {
       'X-RapidAPI-Key': KEY_LOW,
       'X-RapidAPI-Host': HOST,
       'Accept': 'application/json',
-      // 일부 WAF이 UA 없는 서버콜을 컷: UA 부여
       'User-Agent': 'dalae-taobao/1.0 (+https://example.com)',
     },
-    // Edge 캐시 간섭 방지
     cache: 'no-store',
     redirect: 'follow',
-    signal,
+    // ✅ IPv4 고정
+    dispatcher: ipv4Agent,
   });
 }
 
 export async function POST(req: NextRequest) {
-  const started = Date.now();
+  const t0 = Date.now();
   try {
     const { img } = (await req.json()) as { img: string };
     if (!img) {
@@ -106,27 +140,25 @@ export async function POST(req: NextRequest) {
 
     const imgUrl = https(String(img));
 
-    // 타임아웃/에러 디테일 로그용
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20_000);
+    // ✅ 사전 진단: DNS / Rapid index 핑
+    const [dnsInfo, indexPing] = await Promise.all([dnsDiag(HOST), pingRapidIndex()]);
 
     try {
-      const res = await callRapidLow(imgUrl, controller.signal);
+      const res = await callRapidLow(imgUrl);
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         return NextResponse.json(
-          { ok: false, status: res.status, error: text || 'bad_status', dur_ms: Date.now() - started },
+          { ok: false, status: res.status, error: text || 'bad_status', dur_ms: Date.now() - t0, dnsInfo, indexPing },
           { status: 502, headers: { 'Cache-Control': 'no-store' } }
         );
       }
       const json = await res.json();
       const items = parseItems(json);
       return NextResponse.json(
-        { ok: true, items, dur_ms: Date.now() - started },
+        { ok: true, items, dur_ms: Date.now() - t0, dnsInfo, indexPing },
         { status: 200, headers: { 'Cache-Control': 'no-store' } }
       );
     } catch (e: any) {
-      // undici 에러 디테일 까보자
       const cause = (e && e.cause) ? {
         code: e.cause.code,
         errno: e.cause.errno,
@@ -134,18 +166,14 @@ export async function POST(req: NextRequest) {
         address: e.cause.address,
         port: e.cause.port
       } : null;
-      const name = e?.name;
-      const msg = e?.message;
       return NextResponse.json(
-        { ok: false, error: 'fetch_failed', name, msg, cause, dur_ms: Date.now() - started },
+        { ok: false, error: 'fetch_failed', name: e?.name, msg: e?.message, cause, dur_ms: Date.now() - t0, dnsInfo, indexPing },
         { status: 500, headers: { 'Cache-Control': 'no-store' } }
       );
-    } finally {
-      clearTimeout(timeout);
     }
   } catch (e: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message ?? 'server_error', dur_ms: Date.now() - started },
+      { ok: false, error: e?.message ?? 'server_error', dur_ms: Date.now() - t0 },
       { status: 500, headers: { 'Cache-Control': 'no-store' } }
     );
   }
