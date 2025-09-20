@@ -1,33 +1,32 @@
-// app/api/session/[id]/export/route.ts
 import { NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { verifyToken } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 import ExcelJS from "exceljs";
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const { id } = await ctx.params;                   // ← Promise 언래핑
   const token = (await cookies()).get("s_token")?.value;
   const payload = verifyToken(token);
-  if (!payload || payload.session_id !== params.id) {
+  if (!payload || payload.session_id !== id) {
     return new Response(JSON.stringify({ ok:false, error:"unauth" }), { status:401 });
   }
 
-  // rows + selected candidate 조합
-  // 규칙: delete=true 는 제외. skip=true 이면 상품URL 비움. selected_idx가 있으면 해당 후보로 URL/이미지 사용
   const { data: rows, error } = await supabaseAdmin
     .from("rows")
     .select(`
       row_id, order_no, prev_name, category, selected_idx, baedaji, skip, delete, src_img_url,
       candidates: candidates ( idx, img_url, detail_url )
     `)
-    .eq("session_id", params.id)
+    .eq("session_id", id)
     .order("order_no", { ascending: true });
 
-  if (error) return new Response(JSON.stringify({ ok:false, error:"db_rows" }), { status:500 });
+  if (error) {
+    return new Response(JSON.stringify({ ok:false, error:"db_rows" }), { status:500 });
+  }
 
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Results");
-
   const header = ["상품이미지", "이전상품명", "카테고리", "상품명", "배송비", "상품URL", "이미지URL"];
   ws.addRow(header);
 
@@ -40,22 +39,21 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       const sel = (r.candidates || []).find((c:any) => c.idx === r.selected_idx);
       if (sel) {
         prodUrl = sel.detail_url || "";
-        imgUrl = sel.img_url || imgUrl;
+        imgUrl  = sel.img_url || imgUrl;
       }
     }
 
     ws.addRow([
-      "",                           // 상품이미지(엑셀 미리보기는 생략)
+      "",
       r.prev_name || "",
       r.category || "",
-      "",                           // 상품명(웹에서 입력 안 쓰면 빈칸)
+      "",
       bae,
       prodUrl,
-      imgUrl?.startsWith("https:") ? imgUrl.slice(6) : imgUrl, // 파이썬과 동일 로직
+      imgUrl?.startsWith("https:") ? imgUrl.slice(6) : imgUrl,
     ]);
   }
 
-  // 너비 약간
   ws.getColumn(1).width = 40;
   ws.getColumn(2).width = 30;
   ws.getColumn(3).width = 20;
