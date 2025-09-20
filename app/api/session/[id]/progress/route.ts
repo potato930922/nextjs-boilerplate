@@ -1,31 +1,41 @@
-// app/api/session/[id]/progress/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyToken } from '@/lib/auth';
-import { cookies } from 'next/headers';
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
-  const sessionId = params.id;
-
-  const token = (await cookies()).get('s_token')?.value;
-  const payload = verifyToken(token);
-  if (!payload || payload.session_id !== sessionId) {
-    return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
-  }
-
-  const { count: total, error: e1 } = await supabaseAdmin
-    .from('rows')
-    .select('row_id', { count: 'exact', head: true })
-    .eq('session_id', sessionId);
-  if (e1) return NextResponse.json({ ok: false, error: e1.message }, { status: 500 });
-
-  const { count: done, error: e2 } = await supabaseAdmin
+async function countBy(sessionId: string, status: string) {
+  const { count, error } = await supabaseAdmin
     .from('rows')
     .select('row_id', { count: 'exact', head: true })
     .eq('session_id', sessionId)
-    .eq('status', 'done');
-  if (e2) return NextResponse.json({ ok: false, error: e2.message }, { status: 500 });
+    .eq('status', status);
+  if (error) throw error;
+  return count ?? 0;
+}
 
-  const ratio = total ? (done! / total!) : 0;
-  return NextResponse.json({ ok: true, total, done, ratio });
+export async function GET(
+  _req: NextRequest,
+  context: { params: Promise<{ id: string }> } // ✅
+) {
+  const { id: sessionId } = await context.params; // ✅
+  try {
+    const token = (await _req.cookies).get('s_token')?.value;
+    const payload = verifyToken(token);
+    if (!payload || payload.session_id !== sessionId) {
+      return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
+    }
+
+    const [pending, done, skipped, deleted] = await Promise.all([
+      countBy(sessionId, 'pending'),
+      countBy(sessionId, 'done'),
+      countBy(sessionId, 'skipped'),
+      countBy(sessionId, 'deleted'),
+    ]);
+
+    const total = pending + done + skipped + deleted;
+    const ratio = total ? (done + skipped + deleted) / total : 0;
+
+    return NextResponse.json({ ok: true, total, pending, done, skipped, deleted, ratio });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message ?? 'progress_failed' }, { status: 500 });
+  }
 }
