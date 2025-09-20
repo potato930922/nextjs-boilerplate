@@ -1,10 +1,9 @@
 // app/api/session/[id]/progress/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { verifyToken } from '@/lib/auth';           // ⬅ 여기!
+import { verifyToken } from '@/lib/auth';
 import { cookies } from 'next/headers';
 
-// 간단 진행도 계산: 상태별 개수 집계
 async function countByStatus(sessionId: string, status: string) {
   const { count, error } = await supabaseAdmin
     .from('rows')
@@ -17,38 +16,27 @@ async function countByStatus(sessionId: string, status: string) {
 
 export async function GET(
   _req: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
-  const sessionId = params.id;
+  const { id } = await params; // sessionId
 
-  // 인증 (쿠키 → 토큰 검증)
   const token = (await cookies()).get('s_token')?.value;
   const payload = verifyToken(token);
-  if (!payload || payload.session_id !== sessionId) {
+  if (!payload || payload.session_id !== id) {
     return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
   }
 
   try {
     const [pending, done, skipped, deleted] = await Promise.all([
-      countByStatus(sessionId, 'pending'),
-      countByStatus(sessionId, 'done'),
-      countByStatus(sessionId, 'skipped'),
-      countByStatus(sessionId, 'deleted'),
+      countByStatus(id, 'pending'),
+      countByStatus(id, 'done'),
+      countByStatus(id, 'skipped'),
+      countByStatus(id, 'deleted'),
     ]);
-
     const total = pending + done + skipped + deleted;
     const ratio = total ? (done + skipped + deleted) / total : 0;
-
-    return NextResponse.json({
-      ok: true,
-      total,
-      pending,
-      done,
-      skipped,
-      deleted,
-      ratio, // 0~1
-    });
-  } catch (e) {
+    return NextResponse.json({ ok: true, total, pending, done, skipped, deleted, ratio });
+  } catch {
     return NextResponse.json({ ok: false, error: 'db_error' }, { status: 500 });
   }
 }
