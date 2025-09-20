@@ -1,81 +1,79 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 export default function IngestPage() {
-  const [sessionId, setSessionId] = useState('');
-  const [prevNames, setPrevNames]   = useState('');
-  const [categories, setCategories] = useState('');
-  const [newNames, setNewNames]     = useState('');
-  const [imgUrls, setImgUrls]       = useState('');
-  const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [sid, setSid] = useState('');
+  const [prevs, setPrevs] = useState('');
+  const [cats, setCats] = useState('');
+  const [names, setNames] = useState('');
+  const [imgs, setImgs] = useState('');
+  const [msg, setMsg] = useState('');
+  const [done, setDone] = useState(false);
+  const router = useRouter();
 
-  async function submit(useAlt = false) {
-    setBusy(true); setMsg(null);
+  function lines(s:string){ return s.split('\n').map(v=>v.trim()).filter(Boolean); }
+
+  async function onSubmit() {
     try {
-      const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/ingest`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          prev_names:   prevNames.split('\n').map(s => s.trim()).filter(Boolean),
-          categories:   categories.split('\n').map(s => s.trim()),
-          new_names:    newNames.split('\n').map(s => s.trim()),
-          image_urls:   imgUrls.split('\n').map(s => s.trim()).filter(Boolean),
-          use_alt_api:  useAlt,  // 나중에 크롤러에서 참고할 플래그 (지금은 저장만)
-        }),
+      setMsg('등록 중...');
+      const P = lines(prevs), C = lines(cats), N = lines(names), I = lines(imgs);
+      const m = Math.max(P.length, C.length, N.length, I.length);
+      const rows = Array.from({length:m}).map((_,i)=>({
+        prev_name: P[i] || N[i] || '',
+        category: C[i] || '',
+        new_name: N[i] || '',
+        src_img_url: I[i] || '',
+      }));
+      const r = await fetch(`/api/session/${sid}/ingest`, {
+        method:'POST',
+        headers:{ 'content-type':'application/json' },
+        body: JSON.stringify({ rows })
       });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || 'ingest_failed');
-
-      setMsg(`총 ${data.inserted}건 등록 완료! 이제 작업 진행 후, /api/session/${sessionId}/export 로 다운로드하세요.`);
-    } catch (e: any) {
-      setMsg(`오류: ${e.message ?? e}`);
-    } finally {
-      setBusy(false);
+      const j = await r.json();
+      if (!j.ok) { setMsg('실패: ' + (j.error || r.status)); return; }
+      setMsg(`완료: ${j.inserted}건 등록 + 프리페치`);
+      setDone(true);
+    } catch (e:any) {
+      setMsg('에러: ' + e?.message);
     }
   }
 
   return (
-    <div style={{ padding: 24 }}>
-      <h2>행 단위 입력 (엑셀 열 그대로 줄 단위로 붙여넣기)</h2>
-      <div style={{ marginTop: 12 }}>
-        <label>세션 ID:&nbsp;</label>
-        <input
-          value={sessionId}
-          onChange={e => setSessionId(e.target.value)}
-          placeholder="예: S2025-09-19-01"
-          style={{ width: 260, padding: 6 }}
-        />
+    <div style={{padding:24, maxWidth:900, margin:'0 auto', fontFamily:'system-ui'}}>
+      <h2>세션 Ingest</h2>
+
+      <div style={{marginTop:8}}>
+        <label>세션 ID</label>
+        <input value={sid} onChange={e=>setSid(e.target.value)} placeholder="예: S2025-09-19-01" />
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 2fr', gap: 16, marginTop: 20 }}>
+      <div style={{display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:12, marginTop:12}}>
         <div>
-          <div>이전상품명 (줄 단위)</div>
-          <textarea value={prevNames} onChange={e => setPrevNames(e.target.value)} rows={12} style={{ width: '100%' }} />
+          <div>이전상품명 (줄단위)</div>
+          <textarea rows={10} value={prevs} onChange={e=>setPrevs(e.target.value)} />
         </div>
         <div>
-          <div>카테고리 (줄 단위)</div>
-          <textarea value={categories} onChange={e => setCategories(e.target.value)} rows={12} style={{ width: '100%' }} />
+          <div>카테고리 (줄단위)</div>
+          <textarea rows={10} value={cats} onChange={e=>setCats(e.target.value)} />
         </div>
         <div>
-          <div>상품명 (줄 단위)</div>
-          <textarea value={newNames} onChange={e => setNewNames(e.target.value)} rows={12} style={{ width: '100%' }} />
+          <div>상품명 (줄단위)</div>
+          <textarea rows={10} value={names} onChange={e=>setNames(e.target.value)} />
         </div>
         <div>
-          <div>이미지 URL (줄 단위)</div>
-          <textarea value={imgUrls} onChange={e => setImgUrls(e.target.value)} rows={12} style={{ width: '100%' }} />
+          <div>이미지 URL (줄단위)</div>
+          <textarea rows={10} value={imgs} onChange={e=>setImgs(e.target.value)} />
         </div>
       </div>
 
-      <div style={{ marginTop: 16, display: 'flex', gap: 12 }}>
-        <button disabled={busy || !sessionId} onClick={() => submit(false)}>이미지서치</button>
-        <button disabled={busy || !sessionId} onClick={() => submit(true)}>이미지서치(저지연)</button>
-        {busy && <span> 저장 중… </span>}
+      <div style={{marginTop:12, display:'flex', gap:8}}>
+        <button onClick={onSubmit}>이미지서치(저지연)</button>
+        {done && <button onClick={()=>router.push(`/work/${sid}`)}>작업 시작 (work)</button>}
       </div>
 
-      {msg && <div style={{ marginTop: 16, whiteSpace: 'pre-wrap' }}>{msg}</div>}
+      <div style={{marginTop:8}}>{msg}</div>
     </div>
   );
 }
