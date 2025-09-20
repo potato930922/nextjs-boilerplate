@@ -53,8 +53,11 @@ function parseItems(json: any): Item[] {
     const seller = i?.seller_nick ?? i?.nick ?? i?.seller ?? i?.shop_title ?? null;
 
     const detail =
-      i?.detail_url ?? i?.url ?? i?.detailUrl ?? i?.item_url ??
-      (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '') ?? '';
+  i?.detail_url ??
+  i?.url ??
+  i?.detailUrl ??
+  i?.item_url ??
+  (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '');
 
     return {
       img_url: https(String(img)),
