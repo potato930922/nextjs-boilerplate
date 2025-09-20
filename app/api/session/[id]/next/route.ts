@@ -1,40 +1,47 @@
-export const runtime = 'nodejs';
-
+// app/api/session/[id]/next/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { verify } from '@/lib/auth';
+import { verifyToken } from '@/lib/auth';
+import { cookies } from 'next/headers';
 
 export async function GET(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> }
+  _req: NextRequest,
+  { params }: { params: { id: string } }
 ) {
-  const token = req.cookies.get('s_token')?.value;
-  if (!token) return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
-
-  const payload = await verify(token).catch(() => null);
-  const { id } = await context.params;
-  if (!payload || payload.session_id !== id) {
-    return NextResponse.json({ ok: false, error: 'forbidden' }, { status: 403 });
+  const sessionId = params.id;
+  const token = (await cookies()).get('s_token')?.value;
+  const payload = verifyToken(token);
+  if (!payload || payload.session_id !== sessionId) {
+    return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
   }
 
-  // pending 중 가장 작은 order_no
-  const { data: row, error } = await supabaseAdmin
+  // 아직 완료/스킵/삭제되지 않은, 잠금 안 걸린 row 하나
+  // (active_locks 뷰가 있다면 left join으로 제외)
+  const { data: row, error: e1 } = await supabaseAdmin
     .from('rows')
-    .select('*')
-    .eq('session_id', id)
+    .select('row_id, session_id, order_no, prev_name, category, src_img_url, main_thumb_url, selected_idx, baedaji, skip, delete, status, updated_at, edited_by, version')
+    .eq('session_id', sessionId)
     .eq('status', 'pending')
     .order('order_no', { ascending: true })
     .limit(1)
     .maybeSingle();
 
-  if (error) return NextResponse.json({ ok: false, error: 'db' }, { status: 500 });
-  if (!row) return NextResponse.json({ ok: true, done: true });
+  if (e1) {
+    return NextResponse.json({ ok: false, error: 'db_error' }, { status: 500 });
+  }
+  if (!row) {
+    return NextResponse.json({ ok: true, row: null, candidates: [] });
+  }
 
-  const { data: candidates } = await supabaseAdmin
+  const { data: candidates, error: e2 } = await supabaseAdmin
     .from('candidates')
-    .select('*')
+    .select('idx, img_url, detail_url, price, promo_price, sales, seller')
     .eq('row_id', row.row_id)
     .order('idx', { ascending: true });
 
-  return NextResponse.json({ ok: true, row, candidates: candidates ?? [] });
+  if (e2) {
+    return NextResponse.json({ ok: false, error: 'db_error' }, { status: 500 });
+  }
+
+  return NextResponse.json({ ok: true, row, candidates });
 }
