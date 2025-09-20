@@ -1,176 +1,319 @@
+// app/work/[id]/page.tsx
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
-type Cand = {
-  idx: number;
+type Item = {
   img_url: string;
+  promo_price: number | null;
+  price: number | null;
+  sales: string | null;
+  seller: string | null;
   detail_url: string;
-  price: number|null;
-  promo_price: number|null;
-  sales: string|null;
-  seller: string|null;
 };
+
 type Row = {
   row_id: number;
   order_no: number;
-  prev_name: string|null;
-  category: string|null;
-  src_img_url: string|null;
-  main_thumb_url: string|null;
-  selected_idx: number|null;
-  baedaji: number|null;
-  skip: boolean|null;
-  delete: boolean|null;
-  status: string|null;
-  candidates: Cand[];
+  prev_name: string | null;
+  category: string | null;
+  src_img_url: string | null;
+  main_thumb_url: string | null;
+  selected_idx: number | null;
+  baedaji: number | null;
+  skip: boolean | null;
+  delete: boolean | null;
+  status: string | null;
+  candidates?: Item[]; // ← 서버에서 같이 내려주는 후보 8개(이미 프리패치됨)
 };
+
+// 판매량 문자열을 숫자로
+function salesToInt(s: string | null): number {
+  if (!s) return -1;
+  const t = s.toLowerCase().replace(/,/g, '').trim();
+  const m = t.match(/([\d\.]+)\s*([kw万]?)/);
+  if (!m) {
+    const d = t.match(/\d+/);
+    return d ? Number(d[0]) : -1;
+  }
+  let n = parseFloat(m[1]);
+  const u = m[2];
+  if (u === 'w' || u === '万') n *= 10_000;
+  if (u === 'k') n *= 1_000;
+  return Math.round(n);
+}
+
+function https(u?: string | null) {
+  if (!u) return '';
+  return u.startsWith('//') ? `https:${u}` : u;
+}
 
 export default function WorkPage({ params }: { params: { id: string } }) {
   const sessionId = params.id;
+  const router = useRouter();
+
   const [rows, setRows] = useState<Row[]>([]);
   const [idx, setIdx] = useState(0);
-  const [msg, setMsg] = useState('');
   const cur = rows[idx];
 
+  const items: Item[] = useMemo(
+    () => (cur?.candidates ?? new Array(8).fill(null)).map((v) => v ?? ({
+      img_url: '',
+      promo_price: null,
+      price: null,
+      sales: null,
+      seller: null,
+      detail_url: '',
+    })),
+    [cur?.row_id] // 행이 바뀔 때만 갱신
+  );
+
+  const total = rows.length;
+
+  const [msg, setMsg] = useState('');
+  const [bae, setBae] = useState(''); // 배대지(천원 단위) 입력 컨트롤드
+
+  // 행 목록 로드
   useEffect(() => {
     (async () => {
-      const r = await fetch(`/api/session/${sessionId}/rows`, { cache:'no-store' });
+      setMsg('행 불러오는 중…');
+      const r = await fetch(`/api/session/${sessionId}/rows`, { cache: 'no-store' });
       const j = await r.json();
-      if (j.ok) setRows(j.rows);
-      else setMsg('행 불러오기 실패: ' + (j.error || r.status));
+      if (j?.ok) {
+        setRows(j.rows as Row[]);
+        setMsg('');
+      } else {
+        setMsg(`행 불러오기 실패: ${j?.error || r.status}`);
+      }
     })();
   }, [sessionId]);
 
-  async function saveRow(patch: Partial<Row>) {
+  // 현재 행 바뀌면 배대지 입력 값 세팅/리셋
+  useEffect(() => {
+    setBae(cur?.baedaji ? String((cur.baedaji | 0) / 1000) : '');
+  }, [cur?.row_id]);
+
+  // 후보가 보이면, 아직 선택이 비어 있을 때 판매량 최댓값으로 자동 선택 보정
+  useEffect(() => {
     if (!cur) return;
-    setMsg('저장중...');
+    if (cur.selected_idx != null) return;
+    if (!Array.isArray(items) || !items.some((it) => it?.img_url)) return;
+
+    let best = -1;
+    let bestIdx = 0;
+    items.forEach((it, i) => {
+      const s = salesToInt(it?.sales ?? null);
+      if (s > best) {
+        best = s;
+        bestIdx = i;
+      }
+    });
+    if (best >= 0) {
+      // 서버에 저장
+      saveRow({ selected_idx: bestIdx, skip: false, delete: false }, false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, cur?.row_id]);
+
+  // 행 저장
+  async function saveRow(patch: Partial<Row>, showToast = true) {
+    if (!cur) return;
+    if (showToast) setMsg('저장 중…');
+
     const r = await fetch(`/api/row/${cur.row_id}/save`, {
-      method:'POST',
-      headers:{ 'content-type':'application/json' },
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         selected_idx: patch.selected_idx ?? cur.selected_idx,
         baedaji: patch.baedaji ?? cur.baedaji,
         skip: patch.skip ?? cur.skip ?? false,
         delete: patch.delete ?? cur.delete ?? false,
-      })
+      }),
     });
     const j = await r.json();
-    if (!j.ok) { setMsg('저장 실패: ' + (j.error || r.status)); return; }
-    setRows(rs => {
-      const n = [...rs]; n[idx] = { ...cur, ...patch }; return n;
+    if (!j?.ok) {
+      setMsg(`저장 실패: ${j?.error || r.status}`);
+      return;
+    }
+
+    setRows((old) => {
+      const n = [...old];
+      n[idx] = { ...cur, ...patch };
+      return n;
     });
-    setMsg('저장됨');
+    if (showToast) setMsg('저장됨');
   }
 
-  async function onFinish() {
-    setMsg('엑셀 생성 중...');
-    const r = await fetch(`/api/session/${sessionId}/export`);
-    if (!r.ok) { setMsg('export 실패: ' + r.status); return; }
-    const blob = await r.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'results.xlsx'; // 파일명 고정
-    a.click();
-    URL.revokeObjectURL(a.href);
-    setMsg('엑셀 다운로드 완료');
+  // 완료 → 엑셀 export
+  function exportExcel() {
+    window.location.href = `/api/session/${sessionId}/export`;
   }
-
-  const total = rows.length;
 
   return (
-    <div style={{padding:24, maxWidth:1200, margin:'0 auto', fontFamily:'system-ui, sans-serif'}}>
-      <h2>작업창 · 세션 {sessionId}</h2>
+    <div style={{ padding: 24, maxWidth: 1200, margin: '0 auto', fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif' }}>
+      <h2 style={{ marginBottom: 16 }}>작업창 · 세션 {sessionId}</h2>
 
-      <div style={{display:'flex', gap:24}}>
-        {/* 좌: 원본 + 정보 + 컨트롤 */}
-        <div style={{flex:'0 0 360px'}}>
-          {/* 원본 이미지 칸 */}
-          <div style={{width:'100%', aspectRatio:'1/1', background:'#f3f3f3',
-            borderRadius:10, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center', marginBottom:12}}>
-            {cur?.src_img_url
-              ? <img src={`/api/proxy?img=${encodeURIComponent(cur.src_img_url)}`} style={{width:'100%', objectFit:'contain'}}/>
-              : <span style={{color:'#bbb'}}>no image</span>}
+      <div style={{ display: 'flex', gap: 24 }}>
+        {/* 좌측: 원본/정보/컨트롤 */}
+        <div style={{ flex: '0 0 340px' }}>
+          <div style={{ padding: 12, background: '#f6f6f6', borderRadius: 8 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>{cur?.prev_name || '(이전상품명 없음)'}</div>
+            <div style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>{cur?.category || ''}</div>
+            <div style={{ fontSize: 12, color: '#999' }}>행 {idx + 1} / {total}</div>
           </div>
 
-          <div style={{padding:12, background:'#f6f6f6', borderRadius:8}}>
-            <div style={{fontWeight:700, marginBottom:8}}>{cur?.prev_name || '(이전상품명 없음)'}</div>
-            <div style={{fontSize:12, color:'#666', marginBottom:8}}>{cur?.category}</div>
-            <div style={{fontSize:12, color:'#999'}}>행 {idx+1} / {total}</div>
-          </div>
-
-          <div style={{marginTop:12}}>
-            <label style={{fontSize:12}}>배대지(천원 단위)</label>
-            <input
-              key={cur?.row_id}
-              style={{width:'100%', padding:'10px 12px', borderRadius:8, border:'1px solid #ddd', marginTop:6}}
-              placeholder="예: 3 → 3,000원"
-              defaultValue={cur?.baedaji ? String((cur.baedaji|0)/1000) : ''}
-              onBlur={(e) => {
-                const v = e.currentTarget.value.trim();
-                if (!v) return;
-                const num = Number(v);
-                if (Number.isNaN(num)) { setMsg('숫자만 입력'); return; }
-                saveRow({ baedaji: num*1000 });
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 12, marginBottom: 6 }}>원본 이미지</div>
+            <div
+              style={{
+                width: '100%',
+                aspectRatio: '1/1',
+                background: '#f3f3f3',
+                borderRadius: 8,
+                overflow: 'hidden',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
               }}
+            >
+              {cur?.src_img_url ? (
+                <img
+                  src={https(cur.src_img_url)}
+                  style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  alt="원본"
+                />
+              ) : (
+                <span style={{ color: '#bbb' }}>원본 이미지 없음</span>
+              )}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <label style={{ fontSize: 12 }}>배대지(천원 단위)</label>
+            <input
+              value={bae}
+              onChange={(e) => setBae(e.currentTarget.value)}
+              onBlur={() => {
+                if (!bae) return;
+                const num = Number(bae);
+                if (Number.isNaN(num)) { setMsg('숫자만 입력'); return; }
+                saveRow({ baedaji: num * 1000 });
+              }}
+              placeholder="예: 3 → 3,000원"
+              style={{ width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #ddd', marginTop: 6 }}
             />
           </div>
 
-          <div style={{display:'flex', gap:8, marginTop:12}}>
-            <button onClick={() => { if (idx>0) setIdx(idx-1); }} disabled={idx===0}>이전</button>
-            <button onClick={() => { if (idx<total-1) setIdx(idx+1); }} disabled={idx===total-1}>다음</button>
-            <button onClick={onFinish} disabled={!rows.length}>완료(Export)</button>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button type="button" onClick={() => { if (idx > 0) { setIdx(idx - 1); setBae(''); } }} disabled={idx === 0}>
+              이전
+            </button>
+            <button type="button" onClick={() => { if (idx < total - 1) { setIdx(idx + 1); setBae(''); } }} disabled={idx === total - 1}>
+              다음
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                // 모두 끝났을 때 결과 다운로드
+                exportExcel();
+              }}
+              disabled={!rows.length}
+            >
+              완료(엑셀 다운로드)
+            </button>
           </div>
 
-          <div style={{display:'flex', gap:8, marginTop:8}}>
-            <button onClick={() => saveRow({ skip: !cur?.skip, delete:false, selected_idx: null })}>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button
+              type="button"
+              onClick={() => saveRow({ skip: !cur?.skip, delete: false, selected_idx: null })}
+            >
               {cur?.skip ? '적합상품없음 ✅' : '적합상품없음'}
             </button>
-            <button onClick={() => saveRow({ delete: !cur?.delete, skip:false, selected_idx: null })}>
+            <button
+              type="button"
+              onClick={() => saveRow({ delete: !cur?.delete, skip: false, selected_idx: null })}
+            >
               {cur?.delete ? '삭제 예정상품 ✅' : '삭제 예정상품'}
             </button>
           </div>
 
-          <div style={{marginTop:8, color:'#666'}}>{msg}</div>
+          <div style={{ marginTop: 8, color: '#666', minHeight: 20 }}>{msg}</div>
         </div>
 
-        {/* 우: 후보 8개 (이미 선계산된 candidates 사용) */}
-        <div style={{flex:1}}>
-          <div style={{display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:12}}>
-            {(cur?.candidates || []).map((it, i) => {
+        {/* 우측: 후보 8개 */}
+        <div style={{ flex: 1 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+            {items.map((it, i) => {
               const selected = cur?.selected_idx === i && !cur?.skip && !cur?.delete;
+              const price = it.promo_price ?? it.price;
               return (
-                <div key={i} style={{
-                  border:'2px solid', borderColor: selected ? '#ff5a5a' : '#eee',
-                  borderRadius:10, padding:8, background:'#fff'
-                }}>
-                  <div style={{width:'100%', aspectRatio:'1/1', background:'#f3f3f3',
-                    display:'flex', alignItems:'center', justifyContent:'center', overflow:'hidden', borderRadius:8}}>
-                    {it.img_url
-                      ? <img src={`/api/proxy?img=${encodeURIComponent(it.img_url)}`} style={{width:'100%', objectFit:'cover'}} />
-                      : <span style={{color:'#bbb'}}>no image</span>}
+                <div
+                  key={i}
+                  style={{
+                    border: '2px solid',
+                    borderColor: selected ? '#ff5a5a' : '#eee',
+                    borderRadius: 10,
+                    padding: 8,
+                    background: '#fff',
+                  }}
+                >
+                  <div
+                    style={{
+                      width: '100%',
+                      aspectRatio: '1/1',
+                      background: '#f3f3f3',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      overflow: 'hidden',
+                      borderRadius: 8,
+                    }}
+                  >
+                    {it?.img_url ? (
+                      <img
+                        src={https(it.img_url)}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                        alt={`candidate-${i}`}
+                      />
+                    ) : (
+                      <span style={{ color: '#bbb' }}>no image</span>
+                    )}
                   </div>
-                  <div style={{fontSize:12, marginTop:8}}>
-                    {it.promo_price != null || it.price != null
-                      ? <>가격: {(it.promo_price ?? it.price)!.toLocaleString()} {it.promo_price==null ? '(정가)' : ''}</>
+
+                  <div style={{ fontSize: 12, marginTop: 8 }}>
+                    {price != null
+                      ? <>가격: {price.toLocaleString()} {it.promo_price == null ? '(정가)' : ''}</>
                       : <>가격: -</>}
                   </div>
-                  <div style={{fontSize:12, marginTop:4}}>
+                  <div style={{ fontSize: 12, marginTop: 4 }}>
                     판매량: {it.sales ?? '-'} {it.seller ? ` | 판매자: ${it.seller}` : ''}
                   </div>
-                  <div style={{display:'flex', gap:8, marginTop:8}}>
-                    <button onClick={() => saveRow({ selected_idx: (cur?.selected_idx===i ? null : i), skip:false, delete:false })}>
+
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        saveRow({ selected_idx: selected ? null : i, skip: false, delete: false })
+                      }
+                    >
                       {selected ? '선택해제' : '선택'}
                     </button>
-                    {it.detail_url &&
-                      <a href={it.detail_url} target="_blank" rel="noreferrer">
-                        <button type="button">열기</button>
-                      </a>}
+                    <a href={it.detail_url || '#'} target="_blank" rel="noreferrer">
+                      <button type="button" disabled={!it.detail_url}>열기</button>
+                    </a>
                   </div>
                 </div>
               );
             })}
           </div>
+
+          {!items.some((x) => x?.img_url) && (
+            <div style={{ marginTop: 12, color: '#999' }}>
+              표시할 후보가 없습니다. (이미지서치가 끝나지 않았거나 프리패치 결과가 비어 있음)
+            </div>
+          )}
         </div>
       </div>
     </div>
