@@ -3,16 +3,23 @@ import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyToken } from '@/lib/auth';
 import { cookies } from 'next/headers';
 
+// (옵션) 캐시 방지
+export const dynamic = 'force-dynamic';
+
 type Body = {
   prev_names: string[];
   categories: string[];
   new_names: string[];
   image_urls: string[];
-  use_alt_api?: boolean; // 참고용
+  use_alt_api?: boolean;
 };
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
-  const sessionId = params.id;
+export async function POST(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string }> }   // ← 여기! Promise 타입
+) {
+  const { id: sessionId } = await ctx.params; // ← 그리고 await
+
   const token = (await cookies()).get('s_token')?.value;
   const payload = verifyToken(token);
   if (!payload || payload.session_id !== sessionId) {
@@ -33,7 +40,6 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   const len = Math.max(P.length, C.length, N.length, U.length);
   if (!len) return NextResponse.json({ ok: false, error: 'empty' }, { status: 400 });
 
-  // 현재 세션에 이미 데이터가 있으면 order_no를 이어붙이기
   const { data: maxRow, error: maxErr } = await supabaseAdmin
     .from('rows')
     .select('order_no')
@@ -47,14 +53,14 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   }
 
   let base = maxRow?.order_no ?? 0;
+  const rows: any[] = [];
 
-  const rows = [];
   for (let i = 0; i < len; i++) {
     const prev = (P[i] ?? '').trim();
     const cat  = (C[i] ?? '').trim();
     const name = (N[i] ?? '').trim();
     const url  = (U[i] ?? '').trim();
-    if (!url || (!prev && !name)) continue; // 이미지URL 필수, 이름 중 하나 이상
+    if (!url || (!prev && !name)) continue;
 
     base += 1;
     rows.push({
