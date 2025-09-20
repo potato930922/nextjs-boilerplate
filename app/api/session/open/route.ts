@@ -3,6 +3,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { hashPin, signToken } from '@/lib/auth';
 import { z } from 'zod';
+// app/api/session/open/route.ts 등 JWT 쓰는 모든 라우트
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 const bodySchema = z.object({
   session_id: z.string().min(1),
