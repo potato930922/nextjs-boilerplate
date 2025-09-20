@@ -1,24 +1,40 @@
 // lib/auth.ts
-import { createSigner, createVerifier } from 'fast-jwt';
+import { createSigner, createVerifier, type SignerSync, type VerifierSync } from 'fast-jwt';
 import crypto from 'node:crypto';
-
-const JWT_SECRET = process.env.JWT_SECRET!;
-const sign = createSigner({ key: JWT_SECRET, expiresIn: '7d' });
-const verify = createVerifier({ key: JWT_SECRET }); // 내부용
 
 export type SessionPayload = {
   session_id: string;
-  sub?: string; // 사용자 식별자(선택)
+  sub?: string;
 };
 
+let _signer: SignerSync | null = null;
+let _verifier: VerifierSync | null = null;
+
+function getSecret(): string {
+  const s = process.env.JWT_SECRET;
+  if (!s) {
+    // 빌드 시에는 호출되지 않으면 통과. 호출 시에만 에러를 던지도록.
+    throw new Error('JWT_SECRET is not set');
+  }
+  return s;
+}
+function signer(): SignerSync {
+  if (!_signer) _signer = createSigner({ key: getSecret(), expiresIn: '7d' });
+  return _signer;
+}
+function verifier(): VerifierSync {
+  if (!_verifier) _verifier = createVerifier({ key: getSecret() });
+  return _verifier;
+}
+
 export function signToken(payload: SessionPayload) {
-  return sign(payload);
+  return signer()(payload);
 }
 
 export function verifyToken(token?: string | null): SessionPayload | null {
   if (!token) return null;
   try {
-    return verify(token) as SessionPayload;
+    return verifier()(token) as SessionPayload;
   } catch {
     return null;
   }
@@ -30,5 +46,5 @@ export function hashPin(pin: string) {
   return crypto.createHash('sha256').update(salt + pin).digest('hex');
 }
 
-/** 과거 코드 호환(혹시 남아있을 import { verify } 대비) */
+// 과거 import { verify } 호환
 export { verifyToken as verify };
