@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-type Mode = 'low' | 'alt';
+export const runtime = 'nodejs';                 // Edge 금지
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+// Vercel: 가까운 리전 선호(도쿄/서울). 없는 플랫폼이면 무시됨.
+export const preferredRegion = ['hnd1', 'icn1']; 
+
 type Item = {
   img_url: string;
   promo_price: number | null;
@@ -10,140 +15,135 @@ type Item = {
   detail_url: string;
 };
 
-// RapidAPI 엔드포인트
-const URL_LOW = 'https://taobao-advanced.p.rapidapi.com/item_image_search'; // 저지연
-const URL_ALT = 'https://taobao-advanced.p.rapidapi.com/api';               // 일반(내부에 api=item_image_search 파라미터)
-
+const URL_LOW = 'https://taobao-advanced.p.rapidapi.com/item_image_search';
 const HOST = 'taobao-advanced.p.rapidapi.com';
+const KEY_LOW = process.env.RAPIDAPI_TAOBAO_KEY_LOW || '';
 
-// 환경변수(Ver cel → Project → Settings → Environment Variables 에 설정)
-const KEY_LOW = process.env.RAPIDAPI_TAOBAO_KEY_LOW || ''; // 저지연 키
-const KEY_ALT = process.env.RAPIDAPI_TAOBAO_KEY_ALT || ''; // 일반 키
+const https = (u: string) => (u?.startsWith('//') ? `https:${u}` : (u || ''));
 
-// 스키마 없는 url 보정 + 필요 referer 헤더 판단
-const https = (u: string) => (u?.startsWith('//') ? `https:${u}` : u || '');
-const referer = (u: string) =>
-  u.includes('tmall') ? 'https://detail.tmall.com/' : 'https://item.taobao.com/';
+const toNum = (v: any): number | null => {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number' && Number.isFinite(v)) return v;
+  const s = String(v).trim(); if (!s) return null;
+  const n = Number(s.replace(/[^\d.]/g, ''));
+  return Number.isFinite(n) ? n : null;
+};
+const normSales = (v: any): string | null => (v === null || v === undefined ? null : String(v).trim() || null);
 
-// RapidAPI 호출 공통
-async function callRapidAPI(img: string, mode: Mode) {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), 15_000);
-
-  try {
-    if (mode === 'low') {
-      if (!KEY_LOW) throw new Error('no_low_key');
-      const res = await fetch(`${URL_LOW}?img=${encodeURIComponent(img)}`, {
-        method: 'GET',
-        headers: {
-          'x-rapidapi-key': KEY_LOW,
-          'x-rapidapi-host': HOST,
-        },
-        signal: controller.signal,
-        cache: 'no-store',
-      });
-      return res;
-    } else {
-      if (!KEY_ALT) throw new Error('no_alt_key');
-      const url = `${URL_ALT}?api=item_image_search&img=${encodeURIComponent(img)}`;
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'x-rapidapi-key': KEY_ALT,
-          'x-rapidapi-host': HOST,
-        },
-        signal: controller.signal,
-        cache: 'no-store',
-      });
-      return res;
-    }
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-// 응답 → 공통 item 배열로 맵핑
 function parseItems(json: any): Item[] {
-  // 두 엔드포인트가 서로 다른 위치에 담아줄 수 있어서 둘 다 조회
-  const list = json?.result?.item ?? json?.data ?? [];
-  const toF = (v: any) =>
-    v === null || v === undefined || v === '' || v === 'null' ? null : Number(v);
+  const candidates =
+    json?.result?.items ?? json?.result?.item ?? json?.data?.items ?? json?.data ?? json?.items ?? [];
+  const arr = Array.isArray(candidates) ? candidates.slice(0, 8) : [];
 
-  const items: Item[] = (Array.isArray(list) ? list : []).slice(0, 8).map((i: any) => ({
-    img_url: https(i?.pic ?? ''),
-    promo_price: toF(i?.promotion_price),
-    price: toF(i?.price),
-    sales: i?.sales ?? null,
-    seller: i?.seller_nick ?? null,
-    detail_url: https(i?.detail_url ?? ''),
-  }));
+  const items: Item[] = arr.map((i: any) => {
+    const img =
+      i?.pic ?? i?.pic_url ?? i?.pict_url ?? i?.image ??
+      (Array.isArray(i?.small_images) ? i.small_images[0] : '') ?? i?.img ?? '';
 
-  // 8개 미만이면 빈 슬롯 채우기
+    const promo =
+      i?.promotion_price ?? i?.promo_price ?? i?.zk_final_price ?? i?.lowPrice ?? i?.min_price ?? i?.discount_price;
+
+    const price =
+      i?.price ?? i?.reserve_price ?? i?.orgPrice ?? i?.view_price ??
+      i?.max_price ?? i?.original_price ?? (promo ?? null);
+
+    const sales =
+      i?.sales ?? i?.view_sales ?? i?.sold ?? i?.sold_quantity ?? i?.comment_count ?? i?.volume ?? null;
+
+    const seller = i?.seller_nick ?? i?.nick ?? i?.seller ?? i?.shop_title ?? null;
+
+    const detail =
+      i?.detail_url ?? i?.url ?? i?.detailUrl ?? i?.item_url ??
+      (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '') ?? '';
+
+    return {
+      img_url: https(String(img)),
+      promo_price: toNum(promo),
+      price: toNum(price),
+      sales: normSales(sales),
+      seller: seller ? String(seller) : null,
+      detail_url: https(String(detail)),
+    };
+  });
+
   while (items.length < 8) {
-    items.push({
-      img_url: '',
-      promo_price: null,
-      price: null,
-      sales: null,
-      seller: null,
-      detail_url: '',
-    });
+    items.push({ img_url: '', promo_price: null, price: null, sales: null, seller: null, detail_url: '' });
   }
   return items;
 }
 
-// 간단 재시도(429, 5xx)
-async function fetchWithRetry(img: string, mode: Mode, max = 2) {
-  let lastErr: any = null;
-  for (let n = 0; n <= max; n++) {
-    try {
-      const res = await callRapidAPI(img, mode);
-      if (!res.ok) {
-        // Quota 초과, 미구독 등 메시지를 그대로 넘기기
-        const text = await res.text();
-        // console.error('[taobao] bad status', res.status, text);
-        return { ok: false, status: res.status, error: text || 'bad_status' };
-      }
-      const json = await res.json();
-      const items = parseItems(json);
-      return { ok: true, items };
-    } catch (e: any) {
-      lastErr = e?.name === 'AbortError' ? 'timeout' : (e?.message || 'fetch_failed');
-      // 1회 대기 후 재시도
-      await new Promise(r => setTimeout(r, 350));
-    }
-  }
-  return { ok: false, error: lastErr || 'fetch_failed' };
+async function callRapidLow(img: string, signal: AbortSignal) {
+  const url = `${URL_LOW}?img=${encodeURIComponent(img)}`;
+  return fetch(url, {
+    method: 'GET',
+    headers: {
+      'X-RapidAPI-Key': KEY_LOW,
+      'X-RapidAPI-Host': HOST,
+      'Accept': 'application/json',
+      // 일부 WAF이 UA 없는 서버콜을 컷: UA 부여
+      'User-Agent': 'dalae-taobao/1.0 (+https://example.com)',
+    },
+    // Edge 캐시 간섭 방지
+    cache: 'no-store',
+    redirect: 'follow',
+    signal,
+  });
 }
 
 export async function POST(req: NextRequest) {
+  const started = Date.now();
   try {
-    const { img, mode = 'low' } = (await req.json()) as { img: string; mode?: Mode };
-
+    const { img } = (await req.json()) as { img: string };
     if (!img) {
-      return NextResponse.json({ ok: false, error: 'no_img' }, { status: 400 });
+      return NextResponse.json({ ok: false, error: 'no_img' }, { status: 400, headers: { 'Cache-Control': 'no-store' } });
     }
-    if (mode !== 'low' && mode !== 'alt') {
-      return NextResponse.json({ ok: false, error: 'bad_mode' }, { status: 400 });
-    }
-    if (mode === 'low' && !KEY_LOW) {
-      return NextResponse.json({ ok: false, error: 'no_low_key' }, { status: 500 });
-    }
-    if (mode === 'alt' && !KEY_ALT) {
-      return NextResponse.json({ ok: false, error: 'no_alt_key' }, { status: 500 });
+    if (!KEY_LOW) {
+      return NextResponse.json({ ok: false, error: 'no_low_key' }, { status: 500, headers: { 'Cache-Control': 'no-store' } });
     }
 
-    const imgUrl = https(img);
+    const imgUrl = https(String(img));
 
-    // 이미지 요청 쪽에서 referer 를 쓰는 케이스 대비(썸네일 프록시는 여기서 처리하지 않고 클라이언트 <img>가 직접 받음)
-    // 필요 시 여기서 프록시 라우트를 추가해도 됨.
+    // 타임아웃/에러 디테일 로그용
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
 
-    const out = await fetchWithRetry(imgUrl, mode);
-    if (!out.ok) {
-      return NextResponse.json({ ok: false, error: out.error, status: out['status'] ?? 500 }, { status: 502 });
+    try {
+      const res = await callRapidLow(imgUrl, controller.signal);
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        return NextResponse.json(
+          { ok: false, status: res.status, error: text || 'bad_status', dur_ms: Date.now() - started },
+          { status: 502, headers: { 'Cache-Control': 'no-store' } }
+        );
+      }
+      const json = await res.json();
+      const items = parseItems(json);
+      return NextResponse.json(
+        { ok: true, items, dur_ms: Date.now() - started },
+        { status: 200, headers: { 'Cache-Control': 'no-store' } }
+      );
+    } catch (e: any) {
+      // undici 에러 디테일 까보자
+      const cause = (e && e.cause) ? {
+        code: e.cause.code,
+        errno: e.cause.errno,
+        syscall: e.cause.syscall,
+        address: e.cause.address,
+        port: e.cause.port
+      } : null;
+      const name = e?.name;
+      const msg = e?.message;
+      return NextResponse.json(
+        { ok: false, error: 'fetch_failed', name, msg, cause, dur_ms: Date.now() - started },
+        { status: 500, headers: { 'Cache-Control': 'no-store' } }
+      );
+    } finally {
+      clearTimeout(timeout);
     }
-    return NextResponse.json({ ok: true, items: out.items }, { status: 200 });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message ?? 'server_error' }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: e?.message ?? 'server_error', dur_ms: Date.now() - started },
+      { status: 500, headers: { 'Cache-Control': 'no-store' } }
+    );
   }
 }
