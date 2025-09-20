@@ -1,41 +1,54 @@
-export const runtime = 'nodejs';
-
+// app/api/session/[id]/progress/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { verify } from '@/lib/auth';
+import { verifyToken } from '@/lib/auth';           // ⬅ 여기!
+import { cookies } from 'next/headers';
 
-// 선택: 간단 진행도 계산 (RPC 없이)
-async function getProgress(sessionId: string) {
-  const total = await supabaseAdmin
-    .from('rows')
-    .select('row_id', { count: 'exact', head: true })
-    .eq('session_id', sessionId);
-
-  const done = await supabaseAdmin
+// 간단 진행도 계산: 상태별 개수 집계
+async function countByStatus(sessionId: string, status: string) {
+  const { count, error } = await supabaseAdmin
     .from('rows')
     .select('row_id', { count: 'exact', head: true })
     .eq('session_id', sessionId)
-    .neq('status', 'pending');
-
-  return {
-    total: total.count ?? 0,
-    completed: done.count ?? 0,
-  };
+    .eq('status', status);
+  if (error) throw error;
+  return count ?? 0;
 }
 
 export async function GET(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> }
+  _req: NextRequest,
+  { params }: { params: { id: string } }
 ) {
-  const token = req.cookies.get('s_token')?.value;
-  if (!token) return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
+  const sessionId = params.id;
 
-  const payload = await verify(token).catch(() => null);
-  const { id } = await context.params;
-  if (!payload || payload.session_id !== id) {
-    return NextResponse.json({ ok: false, error: 'forbidden' }, { status: 403 });
+  // 인증 (쿠키 → 토큰 검증)
+  const token = (await cookies()).get('s_token')?.value;
+  const payload = verifyToken(token);
+  if (!payload || payload.session_id !== sessionId) {
+    return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
   }
 
-  const prog = await getProgress(id);
-  return NextResponse.json({ ok: true, ...prog });
+  try {
+    const [pending, done, skipped, deleted] = await Promise.all([
+      countByStatus(sessionId, 'pending'),
+      countByStatus(sessionId, 'done'),
+      countByStatus(sessionId, 'skipped'),
+      countByStatus(sessionId, 'deleted'),
+    ]);
+
+    const total = pending + done + skipped + deleted;
+    const ratio = total ? (done + skipped + deleted) / total : 0;
+
+    return NextResponse.json({
+      ok: true,
+      total,
+      pending,
+      done,
+      skipped,
+      deleted,
+      ratio, // 0~1
+    });
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: 'db_error' }, { status: 500 });
+  }
 }
