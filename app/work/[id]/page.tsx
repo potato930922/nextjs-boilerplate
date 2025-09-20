@@ -1,81 +1,47 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 
+type Cand = {
+  idx: number;
+  img_url: string;
+  detail_url: string;
+  price: number|null;
+  promo_price: number|null;
+  sales: string|null;
+  seller: string|null;
+};
 type Row = {
   row_id: number;
   order_no: number;
-  prev_name: string | null;
-  category: string | null;
-  src_img_url: string | null;
-  main_thumb_url: string | null;
-  selected_idx: number | null;
-  baedaji: number | null;
-  skip: boolean | null;
-  delete: boolean | null;
-  status: string | null;
+  prev_name: string|null;
+  category: string|null;
+  src_img_url: string|null;
+  main_thumb_url: string|null;
+  selected_idx: number|null;
+  baedaji: number|null;
+  skip: boolean|null;
+  delete: boolean|null;
+  status: string|null;
+  candidates: Cand[];
 };
-
-type Item = {
-  img_url: string;
-  promo_price: number|null;
-  price: number|null;
-  sales: string|null;
-  seller: string|null;
-  detail_url: string;
-};
-
-function salesToInt(s: string | null): number {
-  if (!s) return -1;
-  const t = s.toLowerCase().replace(/,/g,'').trim();
-  const m = t.match(/([\d\.]+)\s*([kw万]?)/);
-  if (!m) { const d = t.match(/\d+/); return d ? Number(d[0]) : -1; }
-  let n = parseFloat(m[1]); const u = m[2];
-  if (u === 'w' || u === '万') n *= 10000;
-  if (u === 'k') n *= 1000;
-  return Math.round(n);
-}
 
 export default function WorkPage({ params }: { params: { id: string } }) {
   const sessionId = params.id;
-
   const [rows, setRows] = useState<Row[]>([]);
   const [idx, setIdx] = useState(0);
+  const [msg, setMsg] = useState('');
   const cur = rows[idx];
 
-  const [items, setItems] = useState<Item[]>(Array(8).fill({img_url:'',promo_price:null,price:null,sales:null,seller:null,detail_url:''}));
-  const [loading, setLoading] = useState(false);
-  const [mode, setMode] = useState<'low'|'alt'>('low'); // 저지연/일반 토글
-  const [msg, setMsg] = useState<string>('');
-
-  // 1) 세션 행 로드
   useEffect(() => {
     (async () => {
       const r = await fetch(`/api/session/${sessionId}/rows`, { cache:'no-store' });
       const j = await r.json();
       if (j.ok) setRows(j.rows);
-      else setMsg(`행 불러오기 실패: ${j.error || r.status}`);
+      else setMsg('행 불러오기 실패: ' + (j.error || r.status));
     })();
   }, [sessionId]);
 
-  // 2) 후보 8개 불러오기
-  async function loadCandidates(row: Row, useAlt = mode) {
-    if (!row?.src_img_url) { setItems(Array(8).fill({img_url:'',promo_price:null,price:null,sales:null,seller:null,detail_url:''})); return; }
-    setLoading(true); setMsg('');
-    const r = await fetch('/api/taobao/search', {
-      method:'POST',
-      headers:{ 'content-type':'application/json' },
-      body: JSON.stringify({ img: row.src_img_url, mode: useAlt })
-    });
-    const j = await r.json();
-    setLoading(false);
-    if (j.ok) setItems(j.items as Item[]);
-    else setMsg(`이미지서치 실패: ${j.error || r.status}`);
-  }
-
-  useEffect(() => { if (cur) loadCandidates(cur); }, [idx, rows.length]);
-
-  // 3) 선택/스킵/삭제/배대지 저장
   async function saveRow(patch: Partial<Row>) {
     if (!cur) return;
     setMsg('저장중...');
@@ -90,24 +56,43 @@ export default function WorkPage({ params }: { params: { id: string } }) {
       })
     });
     const j = await r.json();
-    if (!j.ok) { setMsg(`저장 실패: ${j.error || r.status}`); return; }
+    if (!j.ok) { setMsg('저장 실패: ' + (j.error || r.status)); return; }
     setRows(rs => {
-      const n = [...rs];
-      n[idx] = { ...cur, ...patch };
-      return n;
+      const n = [...rs]; n[idx] = { ...cur, ...patch }; return n;
     });
     setMsg('저장됨');
+  }
+
+  async function onFinish() {
+    setMsg('엑셀 생성 중...');
+    const r = await fetch(`/api/session/${sessionId}/export`);
+    if (!r.ok) { setMsg('export 실패: ' + r.status); return; }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'results.xlsx'; // 파일명 고정
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setMsg('엑셀 다운로드 완료');
   }
 
   const total = rows.length;
 
   return (
-    <div style={{padding:24, maxWidth:1100, margin:'0 auto', fontFamily:'system-ui, sans-serif'}}>
+    <div style={{padding:24, maxWidth:1200, margin:'0 auto', fontFamily:'system-ui, sans-serif'}}>
       <h2>작업창 · 세션 {sessionId}</h2>
 
       <div style={{display:'flex', gap:24}}>
-        {/* 좌: 기본정보 + 컨트롤 */}
+        {/* 좌: 원본 + 정보 + 컨트롤 */}
         <div style={{flex:'0 0 360px'}}>
+          {/* 원본 이미지 칸 */}
+          <div style={{width:'100%', aspectRatio:'1/1', background:'#f3f3f3',
+            borderRadius:10, overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center', marginBottom:12}}>
+            {cur?.src_img_url
+              ? <img src={`/api/proxy?img=${encodeURIComponent(cur.src_img_url)}`} style={{width:'100%', objectFit:'contain'}}/>
+              : <span style={{color:'#bbb'}}>no image</span>}
+          </div>
+
           <div style={{padding:12, background:'#f6f6f6', borderRadius:8}}>
             <div style={{fontWeight:700, marginBottom:8}}>{cur?.prev_name || '(이전상품명 없음)'}</div>
             <div style={{fontSize:12, color:'#666', marginBottom:8}}>{cur?.category}</div>
@@ -117,6 +102,7 @@ export default function WorkPage({ params }: { params: { id: string } }) {
           <div style={{marginTop:12}}>
             <label style={{fontSize:12}}>배대지(천원 단위)</label>
             <input
+              key={cur?.row_id}
               style={{width:'100%', padding:'10px 12px', borderRadius:8, border:'1px solid #ddd', marginTop:6}}
               placeholder="예: 3 → 3,000원"
               defaultValue={cur?.baedaji ? String((cur.baedaji|0)/1000) : ''}
@@ -133,11 +119,7 @@ export default function WorkPage({ params }: { params: { id: string } }) {
           <div style={{display:'flex', gap:8, marginTop:12}}>
             <button onClick={() => { if (idx>0) setIdx(idx-1); }} disabled={idx===0}>이전</button>
             <button onClick={() => { if (idx<total-1) setIdx(idx+1); }} disabled={idx===total-1}>다음</button>
-            <button onClick={() => { if (cur) loadCandidates(cur, mode); }} disabled={loading}>재검색</button>
-            <select value={mode} onChange={e => setMode(e.target.value as any)}>
-              <option value="low">저지연</option>
-              <option value="alt">일반</option>
-            </select>
+            <button onClick={onFinish} disabled={!rows.length}>완료(Export)</button>
           </div>
 
           <div style={{display:'flex', gap:8, marginTop:8}}>
@@ -152,10 +134,10 @@ export default function WorkPage({ params }: { params: { id: string } }) {
           <div style={{marginTop:8, color:'#666'}}>{msg}</div>
         </div>
 
-        {/* 우: 후보 8개 */}
+        {/* 우: 후보 8개 (이미 선계산된 candidates 사용) */}
         <div style={{flex:1}}>
           <div style={{display:'grid', gridTemplateColumns:'repeat(4, 1fr)', gap:12}}>
-            {items.map((it, i) => {
+            {(cur?.candidates || []).map((it, i) => {
               const selected = cur?.selected_idx === i && !cur?.skip && !cur?.delete;
               return (
                 <div key={i} style={{
@@ -165,7 +147,7 @@ export default function WorkPage({ params }: { params: { id: string } }) {
                   <div style={{width:'100%', aspectRatio:'1/1', background:'#f3f3f3',
                     display:'flex', alignItems:'center', justifyContent:'center', overflow:'hidden', borderRadius:8}}>
                     {it.img_url
-                      ? <img src={it.img_url} style={{width:'100%', objectFit:'cover'}} />
+                      ? <img src={`/api/proxy?img=${encodeURIComponent(it.img_url)}`} style={{width:'100%', objectFit:'cover'}} />
                       : <span style={{color:'#bbb'}}>no image</span>}
                   </div>
                   <div style={{fontSize:12, marginTop:8}}>
@@ -189,7 +171,6 @@ export default function WorkPage({ params }: { params: { id: string } }) {
               );
             })}
           </div>
-          {loading && <div style={{marginTop:8}}>이미지서치 중...</div>}
         </div>
       </div>
     </div>
