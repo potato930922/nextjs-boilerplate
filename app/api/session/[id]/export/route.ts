@@ -1,105 +1,71 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { verifyToken } from '@/lib/auth';
-import { cookies } from 'next/headers';
-import ExcelJS from 'exceljs';
+// app/api/session/[id]/export/route.ts
+import { NextRequest } from "next/server";
+import { cookies } from "next/headers";
+import { verifyToken } from "@/lib/auth";
+import { supabaseAdmin } from "@/lib/supabaseAdmin";
+import ExcelJS from "exceljs";
 
-// exceljs는 Node 런타임 필요
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-
-export async function GET(
-  _req: NextRequest,
-  ctx: { params: Promise<{ id: string }> }   // ← Promise 타입
-) {
-  const { id: sessionId } = await ctx.params; // ← await
-
-  const token = (await cookies()).get('s_token')?.value;
+export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+  const token = (await cookies()).get("s_token")?.value;
   const payload = verifyToken(token);
-  if (!payload || payload.session_id !== sessionId) {
-    return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
+  if (!payload || payload.session_id !== params.id) {
+    return new Response(JSON.stringify({ ok:false, error:"unauth" }), { status:401 });
   }
 
-  const { data: rows, error: rowsErr } = await supabaseAdmin
-    .from('rows')
-    .select('row_id, prev_name, category, src_img_url, new_name, baedaji, skip, delete, selected_idx')
-    .eq('session_id', sessionId)
-    .order('order_no', { ascending: true });
+  // rows + selected candidate 조합
+  // 규칙: delete=true 는 제외. skip=true 이면 상품URL 비움. selected_idx가 있으면 해당 후보로 URL/이미지 사용
+  const { data: rows, error } = await supabaseAdmin
+    .from("rows")
+    .select(`
+      row_id, order_no, prev_name, category, selected_idx, baedaji, skip, delete, src_img_url,
+      candidates: candidates ( idx, img_url, detail_url )
+    `)
+    .eq("session_id", params.id)
+    .order("order_no", { ascending: true });
 
-  if (rowsErr) {
-    return NextResponse.json({ ok: false, error: 'db_rows' }, { status: 500 });
-  }
-
-  const selectedRowIds = rows
-    .filter(r => !r.delete && !r.skip && r.selected_idx !== null)
-    .map(r => r.row_id);
-
-  let candMap = new Map<number, { detail_url: string; img_url: string }>();
-  if (selectedRowIds.length) {
-    const { data: cands, error: cErr } = await supabaseAdmin
-      .from('candidates')
-      .select('row_id, idx, detail_url, img_url')
-      .in('row_id', selectedRowIds);
-
-    if (cErr) {
-      return NextResponse.json({ ok: false, error: 'db_cands' }, { status: 500 });
-    }
-    for (const r of rows) {
-      const sel = r.selected_idx;
-      if (sel === null) continue;
-      const found = cands?.find(c => c.row_id === r.row_id && c.idx === sel);
-      if (found) candMap.set(r.row_id, { detail_url: found.detail_url, img_url: found.img_url });
-    }
-  }
+  if (error) return new Response(JSON.stringify({ ok:false, error:"db_rows" }), { status:500 });
 
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet('Sheet1');
-  ws.columns = [
-    { header: '상품이미지', key: 'A', width: 40 },
-    { header: '이전상품명', key: 'B', width: 30 },
-    { header: '카테고리',   key: 'C', width: 20 },
-    { header: '상품명',     key: 'D', width: 30 },
-    { header: '배송비',     key: 'E', width: 12 },
-    { header: '상품URL',    key: 'F', width: 60 },
-    { header: '이미지URL',  key: 'G', width: 60 },
-  ];
+  const ws = wb.addWorksheet("Results");
 
-  const mainRows: any[] = [];
-  const skipRows: any[] = [];
+  const header = ["상품이미지", "이전상품명", "카테고리", "상품명", "배송비", "상품URL", "이미지URL"];
+  ws.addRow(header);
 
-  for (const r of rows) {
+  for (const r of rows || []) {
     if (r.delete) continue;
-    const base = {
-      A: '',
-      B: r.prev_name ?? '',
-      C: r.category ?? '',
-      D: r.new_name ?? '',
-      E: r.baedaji ?? '',
-      F: '',
-      G: r.src_img_url || '',
-    };
-    if (!r.skip && r.selected_idx !== null) {
-      const sel = candMap.get(r.row_id);
-      mainRows.push({
-        ...base,
-        F: sel?.detail_url ?? '',
-        G: sel?.img_url ? sel.img_url.replace(/^https:/, '') : base.G,
-      });
-    } else {
-      skipRows.push(base);
+    const bae = r.baedaji ?? "";
+    let prodUrl = "", imgUrl = r.src_img_url || "";
+
+    if (!r.skip && r.selected_idx != null) {
+      const sel = (r.candidates || []).find((c:any) => c.idx === r.selected_idx);
+      if (sel) {
+        prodUrl = sel.detail_url || "";
+        imgUrl = sel.img_url || imgUrl;
+      }
     }
+
+    ws.addRow([
+      "",                           // 상품이미지(엑셀 미리보기는 생략)
+      r.prev_name || "",
+      r.category || "",
+      "",                           // 상품명(웹에서 입력 안 쓰면 빈칸)
+      bae,
+      prodUrl,
+      imgUrl?.startsWith("https:") ? imgUrl.slice(6) : imgUrl, // 파이썬과 동일 로직
+    ]);
   }
 
-  for (const row of [...mainRows, ...skipRows]) ws.addRow(row);
+  // 너비 약간
+  ws.getColumn(1).width = 40;
+  ws.getColumn(2).width = 30;
+  ws.getColumn(3).width = 20;
+  ws.getColumn(4).width = 30;
 
   const buf = await wb.xlsx.writeBuffer();
-
-  return new NextResponse(buf as any, {
-    status: 200,
+  return new Response(buf, {
     headers: {
-      'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      'content-disposition': 'attachment; filename="results.xlsx"',
-      'cache-control': 'no-store',
+      "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "content-disposition": `attachment; filename="results.xlsx"`,
     },
   });
 }
