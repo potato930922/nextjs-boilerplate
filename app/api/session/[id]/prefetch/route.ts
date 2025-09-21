@@ -4,12 +4,25 @@ import { cookies } from 'next/headers';
 import { verifyToken } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
-// 런타임/캐시 정책
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-type CandidateItem = {
+const HOST = 'taobao-advanced.p.rapidapi.com';
+const URL_LOW = `https://${HOST}/item_image_search`;
+const KEY_LOW = process.env.RAPIDAPI_TAOBAO_KEY_LOW || '';
+
+const https = (u: string) => (u?.startsWith('//') ? `https:${u}` : (u || ''));
+
+const toNum = (v: any): number | null => {
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (!s || s === 'null') return null;
+  const n = Number(s.replace(/[^\d.]/g, ''));
+  return Number.isFinite(n) ? n : null;
+};
+
+type Cand = {
   idx: number;
   img_url: string;
   detail_url: string;
@@ -19,42 +32,48 @@ type CandidateItem = {
   seller: string | null;
 };
 
-const HOST = 'taobao-advanced.p.rapidapi.com';
-const URL_LOW = `https://${HOST}/item_image_search`;
-const KEY_LOW = process.env.RAPIDAPI_TAOBAO_KEY_LOW || '';
+// 다양한 응답 스키마를 흡수
+function pickList(j: any): any[] {
+  if (!j || typeof j !== 'object') return [];
+  return (
+    j?.result?.items ??
+    j?.result?.item ??
+    j?.data?.items ??
+    j?.data ??
+    j?.items ??
+    []
+  );
+}
 
-const https = (u: string): string =>
-  u ? (u.startsWith('//') ? `https:${u}` : u) : '';
-
-const toNum = (v: unknown): number | null => {
-  if (v === null || v === undefined) return null;
-  const s = String(v).trim();
-  if (!s || s === 'null') return null;
-  const n = Number(s.replace(/[^\d.]/g, ''));
-  return Number.isFinite(n) ? n : null;
-};
-
-function normalize(raw: unknown): CandidateItem[] {
+function normalize(raw: any): Cand[] {
   const arr = Array.isArray(raw) ? raw.slice(0, 8) : [];
+  const items = arr.map((i: any, idx: number) => {
+    const img =
+      i?.pic ?? i?.pic_url ?? i?.pict_url ?? i?.image ?? i?.img ?? (Array.isArray(i?.small_images) ? i.small_images[0] : '');
+    const detail =
+      i?.detail_url ?? i?.url ?? i?.detailUrl ?? i?.item_url ??
+      (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '');
+    const promo =
+      i?.promotion_price ?? i?.promo_price ?? i?.zk_final_price;
+    const price =
+      i?.price ?? i?.reserve_price ?? i?.orgPrice ?? i?.view_price ?? promo;
 
-  const items: CandidateItem[] = arr.map((i: any, idx: number) => ({
-    idx,
-    img_url: https(i?.pic ?? i?.pic_url ?? i?.pict_url ?? i?.image ?? i?.img ?? ''),
-    detail_url: https(
-      i?.detail_url ??
-        i?.url ??
-        i?.detailUrl ??
-        i?.item_url ??
-        (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '')
-    ),
-    price: toNum(i?.price ?? i?.reserve_price ?? i?.orgPrice ?? i?.view_price),
-    promo_price: toNum(i?.promotion_price ?? i?.promo_price ?? i?.zk_final_price),
-    sales: (i?.sales ?? i?.view_sales ?? i?.volume ?? null)
-      ? String(i?.sales ?? i?.view_sales ?? i?.volume)
-      : null,
-    seller: i?.seller_nick ?? i?.nick ?? i?.shop_title ?? null,
-  }));
+    const sales =
+      i?.sales ?? i?.view_sales ?? i?.volume ?? i?.sold ?? i?.sold_quantity ?? null;
+    const seller = i?.seller_nick ?? i?.nick ?? i?.seller ?? i?.shop_title ?? null;
 
+    return {
+      idx,
+      img_url: https(String(img || '')),
+      detail_url: https(String(detail || '')),
+      price: toNum(price),
+      promo_price: toNum(promo),
+      sales: sales ? String(sales) : null,
+      seller: seller ? String(seller) : null,
+    };
+  });
+
+  // 빈 슬롯 보충(프론트 렌더 안정성)
   while (items.length < 8) {
     items.push({
       idx: items.length,
@@ -69,105 +88,112 @@ function normalize(raw: unknown): CandidateItem[] {
   return items;
 }
 
-async function searchTaobaoLow(img: string): Promise<CandidateItem[]> {
-  if (!KEY_LOW) throw new Error('no_low_key');
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20_000);
-
-  try {
-    const u = new URL(URL_LOW);
-    u.searchParams.set('img', https(img));
-
-    const r = await fetch(u, {
-      method: 'GET',
-      headers: {
-        'X-RapidAPI-Key': KEY_LOW,
-        'X-RapidAPI-Host': HOST,
-        'Accept': 'application/json',
-        'User-Agent': 'dalae-taobao/1.0',
-      },
-      cache: 'no-store',
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-
-    if (!r.ok) {
-      const text = await r.text().catch(() => '');
-      throw new Error(`upstream_${r.status}:${text.slice(0, 200)}`);
-    }
-
-    const j = await r.json();
-    const raw = j?.result?.item ?? j?.data ?? [];
-    return normalize(raw);
-  } finally {
-    clearTimeout(timer);
+async function taobaoLow(img: string) {
+  const u = new URL(URL_LOW);
+  u.searchParams.set('img', https(img));
+  const r = await fetch(u, {
+    headers: {
+      'X-RapidAPI-Key': KEY_LOW,
+      'X-RapidAPI-Host': HOST,
+      'Accept': 'application/json',
+      'User-Agent': 'dalae-taobao/1.0',
+    },
+    cache: 'no-store',
+  });
+  const text = await r.text();
+  if (!r.ok) {
+    throw new Error(`upstream_${r.status}:${text.slice(0, 300)}`);
   }
+  // parse 후 꼭 list 길이 확인
+  let j: any = {};
+  try { j = JSON.parse(text); } catch { j = {}; }
+  const list = pickList(j);
+  return { list, raw: j, text: text.slice(0, 5000) };
 }
 
-// ✅ 프로젝트 타입 규칙: params는 Promise로 전달됨
-export async function POST(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> }
-): Promise<Response> {
-  const started = Date.now();
+// 프로젝트 타입: params, cookies 둘 다 Promise
+export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
+  const { id: sessionId } = await ctx.params;
 
-  try {
-    const { id: sessionId } = await context.params;
+  // 인증
+  const store = await cookies();
+  const token = store.get('s_token')?.value;
+  const payload = verifyToken(token);
+  if (!payload || payload.session_id !== sessionId) {
+    return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
+  }
 
-    // ✅ 이 프로젝트에선 cookies()가 Promise 타입이므로 await 필요
-    const cookieStore = await cookies();
-    const token = cookieStore.get('s_token')?.value;
+  if (!KEY_LOW) {
+    return NextResponse.json({ ok: false, error: 'no_low_key' }, { status: 500 });
+  }
 
-    const payload = verifyToken(token);
-    if (!payload || payload.session_id !== sessionId) {
-      return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
+  // rows 조회
+  const { data: rows, error } = await supabaseAdmin
+    .from('rows')
+    .select('row_id, src_img_url')
+    .eq('session_id', sessionId)
+    .order('order_no');
+
+  if (error) {
+    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+  }
+
+  let processed = 0;
+  let withCandidates = 0;
+  const debugSamples: any[] = []; // 각 row마다 상위 1개만 디버그 기록
+
+  for (const row of rows ?? []) {
+    const img = row.src_img_url ?? '';
+    if (!img) continue;
+
+    // 기존 후보 삭제(실패 시 즉시 리턴해서 원인 파악)
+    const del = await supabaseAdmin.from('candidates').delete().eq('row_id', row.row_id);
+    if (del.error) {
+      return NextResponse.json({ ok: false, error: 'cand_delete_failed', detail: del.error.message }, { status: 500 });
     }
 
-    // rows 조회
-    const { data: rows, error } = await supabaseAdmin
-      .from('rows')
-      .select('row_id, src_img_url')
-      .eq('session_id', sessionId)
-      .order('order_no');
-
-    if (error) {
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-    }
-
-    let processed = 0;
-
-    for (const row of rows ?? []) {
-      const img = row.src_img_url ?? '';
-      if (!img) continue;
-
-      // 기존 후보 삭제
-      await supabaseAdmin.from('candidates').delete().eq('row_id', row.row_id);
-
-      // Taobao 이미지 서치 (low 전용)
-      const items = await searchTaobaoLow(img);
+    try {
+      const { list, raw, text } = await taobaoLow(img);
+      const items = normalize(list)
+        // 완전 빈 레코드는 삽입하지 않음(적어도 하나는 있어야 카드가 의미)
+        .filter((it) => it.img_url || it.detail_url);
 
       if (items.length) {
-        // candidates 테이블: row_id, idx, img_url, detail_url, price, promo_price, sales, seller
-        await supabaseAdmin.from('candidates').insert(
+        const ins = await supabaseAdmin.from('candidates').insert(
           items.map((it) => ({ row_id: row.row_id, ...it }))
         );
+        if (ins.error) {
+          return NextResponse.json({ ok: false, error: 'cand_insert_failed', detail: ins.error.message }, { status: 500 });
+        }
+        withCandidates++;
       }
 
-      processed += 1;
+      // 디버그 샘플 기록(최상위 1개 + list 길이)
+      debugSamples.push({
+        row_id: row.row_id,
+        list_len: Array.isArray(list) ? list.length : 0,
+        sample: items[0] ?? null,
+        // rapid_text: text.slice(0, 300), // 필요 시 열기
+      });
 
-      // 과도 호출 방지(필요 시 조정)
-      await new Promise((r) => setTimeout(r, 250));
+    } catch (e: any) {
+      // 이 row는 스킵하고 계속
+      debugSamples.push({
+        row_id: row.row_id,
+        error: e?.message || String(e),
+      });
     }
 
-    return NextResponse.json(
-      { ok: true, session_id: sessionId, processed, dur_ms: Date.now() - started },
-      { status: 200 }
-    );
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? 'prefetch_error' },
-      { status: 500 }
-    );
+    processed++;
+    await new Promise(r => setTimeout(r, 250));
   }
+
+  return NextResponse.json({
+    ok: true,
+    session_id: sessionId,
+    processed,
+    rows: rows?.length ?? 0,
+    withCandidates,      // 후보가 실제 삽입된 row 수
+    debugSamples,        // 각 row의 list_len/첫 샘플/오류 등
+  });
 }
