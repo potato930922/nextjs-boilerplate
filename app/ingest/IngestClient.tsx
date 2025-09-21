@@ -63,6 +63,7 @@ export default function IngestClient() {
 
   function startPolling() {
     stopPolling();
+    if (!sid) return;
     pollTimer.current = setInterval(() => pollProgress(sid), 1500);
   }
   function stopPolling() {
@@ -93,7 +94,8 @@ export default function IngestClient() {
     return rows;
   }
 
-  // 서버에 인제스트 요청 (기존 rows 전부 삭제 후 새로 입력 + 저지연 이미지서치)
+  // 서버에 인제스트 요청 (기존 rows 전부 삭제 후 새로 입력)
+  // ✅ 업로드 성공 시 즉시 /prefetch 트리거 → 이후 /progress 폴링
   async function doIngest() {
     if (!sid) {
       alert('세션 ID(?sid=...)가 필요합니다.');
@@ -112,14 +114,14 @@ export default function IngestClient() {
 
     try {
       // 1) 인제스트 호출
-      const r = await fetch(`/api/session/${sid}/ingest`, {
+      const r = await fetch(`/api/session/${encodeURIComponent(sid)}/ingest`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           purge: true,     // 기존 row 삭제
-          mode: 'low',     // 저지연 이미지서치
           rows,            // 입력 행
         }),
+        cache: 'no-store',
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) {
@@ -128,7 +130,20 @@ export default function IngestClient() {
         return;
       }
 
-      // 2) 진행률 폴링 시작 (완료 시 100%가 되어 Work 이동 가능)
+      // 1.5) 프리페치(저지연 타오바오 검색) 트리거 — 단발 호출
+      setMsg('이미지 서칭 시작…');
+      const pf = await fetch(`/api/session/${encodeURIComponent(sid)}/prefetch`, {
+        method: 'POST',
+        cache: 'no-store',
+      });
+      const pj = await pf.json().catch(() => ({}));
+      if (!pf.ok || !pj.ok) {
+        setBusy(false);
+        setMsg(`프리페치 시작 실패: ${pj.error || pf.status}`);
+        return;
+      }
+
+      // 2) 진행률 폴링 시작
       setMsg('이미지 서칭 중…');
       startPolling();
     } catch (e) {
