@@ -78,7 +78,6 @@ export async function POST(
         order_no: idx + 1,
         prev_name: r.prev_name ?? null,
         category: r.category ?? null,
-        new_name: r.new_name ?? null,
         src_img_url: r.src_img_url ?? null,
         main_thumb_url: null,
         selected_idx: null,
