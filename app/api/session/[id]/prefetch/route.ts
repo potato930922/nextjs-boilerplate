@@ -105,7 +105,7 @@ async function searchTaobaoLow(img: string): Promise<CandidateItem[]> {
   }
 }
 
-// ✅ 프로젝트 타입에 맞춘 시그니처: params가 Promise로 들어옴
+// ✅ 프로젝트 타입 규칙: params는 Promise로 전달됨
 export async function POST(
   req: NextRequest,
   context: { params: Promise<{ id: string }> }
@@ -115,15 +115,16 @@ export async function POST(
   try {
     const { id: sessionId } = await context.params;
 
-    // cookies()는 동기 API
-    const token = cookies().get('s_token')?.value;
-    const payload = verifyToken(token);
+    // ✅ 이 프로젝트에선 cookies()가 Promise 타입이므로 await 필요
+    const cookieStore = await cookies();
+    const token = cookieStore.get('s_token')?.value;
 
+    const payload = verifyToken(token);
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
     }
 
-    // rows 가져오기
+    // rows 조회
     const { data: rows, error } = await supabaseAdmin
       .from('rows')
       .select('row_id, src_img_url')
@@ -147,7 +148,7 @@ export async function POST(
       const items = await searchTaobaoLow(img);
 
       if (items.length) {
-        // candidates 테이블 스키마: row_id, idx, img_url, detail_url, price, promo_price, sales, seller
+        // candidates 테이블: row_id, idx, img_url, detail_url, price, promo_price, sales, seller
         await supabaseAdmin.from('candidates').insert(
           items.map((it) => ({ row_id: row.row_id, ...it }))
         );
@@ -155,7 +156,7 @@ export async function POST(
 
       processed += 1;
 
-      // 과도 호출 방지(필요시 조정)
+      // 과도 호출 방지(필요 시 조정)
       await new Promise((r) => setTimeout(r, 250));
     }
 
