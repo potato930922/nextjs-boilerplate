@@ -25,7 +25,7 @@ type Row = {
   skip: boolean | null;
   delete: boolean | null;
   status: string | null;
-  candidates?: Item[]; // ← 서버에서 같이 내려주는 후보 8개(이미 프리패치됨)
+  candidates?: Item[]; // 서버에서 내려주는 후보 8개
 };
 
 // 판매량 문자열을 숫자로
@@ -44,9 +44,16 @@ function salesToInt(s: string | null): number {
   return Math.round(n);
 }
 
+// https 보정
 function https(u?: string | null) {
   if (!u) return '';
   return u.startsWith('//') ? `https:${u}` : u;
+}
+
+// 이미지 프록시 (레퍼러 차단 회피)
+function proxied(u?: string | null) {
+  const s = https(u || '');
+  return s ? `/api/img?u=${encodeURIComponent(s)}` : '';
 }
 
 export default function WorkPage({ params }: { params: { id: string } }) {
@@ -57,16 +64,21 @@ export default function WorkPage({ params }: { params: { id: string } }) {
   const [idx, setIdx] = useState(0);
   const cur = rows[idx];
 
+  // ✅ candidates가 나중에 채워져도 재계산되도록 의존성에 포함
   const items: Item[] = useMemo(
-    () => (cur?.candidates ?? new Array(8).fill(null)).map((v) => v ?? ({
-      img_url: '',
-      promo_price: null,
-      price: null,
-      sales: null,
-      seller: null,
-      detail_url: '',
-    })),
-    [cur?.row_id] // 행이 바뀔 때만 갱신
+    () =>
+      (cur?.candidates ?? new Array(8).fill(null)).map(
+        (v) =>
+          v ?? {
+            img_url: '',
+            promo_price: null,
+            price: null,
+            sales: null,
+            seller: null,
+            detail_url: '',
+          }
+      ),
+    [cur?.row_id, cur?.candidates] // ← 여기 추가
   );
 
   const total = rows.length;
@@ -179,7 +191,8 @@ export default function WorkPage({ params }: { params: { id: string } }) {
             >
               {cur?.src_img_url ? (
                 <img
-                  src={https(cur.src_img_url)}
+                  // 🔑 원본도 프록시로
+                  src={proxied(cur.src_img_url)}
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   alt="원본"
                 />
@@ -215,7 +228,6 @@ export default function WorkPage({ params }: { params: { id: string } }) {
             <button
               type="button"
               onClick={() => {
-                // 모두 끝났을 때 결과 다운로드
                 exportExcel();
               }}
               disabled={!rows.length}
@@ -248,6 +260,8 @@ export default function WorkPage({ params }: { params: { id: string } }) {
             {items.map((it, i) => {
               const selected = cur?.selected_idx === i && !cur?.skip && !cur?.delete;
               const price = it.promo_price ?? it.price;
+              const imgSrc = proxied(it?.img_url || '');
+
               return (
                 <div
                   key={i}
@@ -271,9 +285,9 @@ export default function WorkPage({ params }: { params: { id: string } }) {
                       borderRadius: 8,
                     }}
                   >
-                    {it?.img_url ? (
+                    {imgSrc ? (
                       <img
-                        src={https(it.img_url)}
+                        src={imgSrc}
                         style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                         alt={`candidate-${i}`}
                       />
@@ -300,7 +314,7 @@ export default function WorkPage({ params }: { params: { id: string } }) {
                     >
                       {selected ? '선택해제' : '선택'}
                     </button>
-                    <a href={it.detail_url || '#'} target="_blank" rel="noreferrer">
+                    <a href={https(it.detail_url) || '#'} target="_blank" rel="noreferrer">
                       <button type="button" disabled={!it.detail_url}>열기</button>
                     </a>
                   </div>
