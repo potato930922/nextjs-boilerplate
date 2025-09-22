@@ -31,39 +31,15 @@ const toUrl = (u?: any) => {
 };
 
 function pickImage(i: any): string {
-  const singles = [
-    i?.pic, i?.pict_url, i?.pictUrl, i?.pic_url, i?.picUrl,
-    i?.image_url, i?.imageUrl, i?.img_url, i?.imgUrl, i?.img, i?.image,
-    i?.main_pic, i?.mainPic, i?.thumbnail, i?.thumb,
-  ];
+  const singles = [i?.pic, i?.pict_url, i?.pictUrl, i?.pic_url, i?.picUrl, i?.image_url, i?.imageUrl, i?.img_url, i?.imgUrl, i?.img, i?.image, i?.main_pic, i?.mainPic, i?.thumbnail, i?.thumb];
   for (const v of singles) {
     const u = toUrl(v);
     if (u) return u;
   }
-  const arrays = [i?.small_images, i?.smallImages, i?.images, i?.imgs];
-  for (const a of arrays) {
-    if (Array.isArray(a) && a.length) {
-      const u = toUrl(a[0]);
-      if (u) return u;
-    }
-    if (typeof a === 'string' && a) {
-      try {
-        const parsed = JSON.parse(a);
-        if (Array.isArray(parsed) && parsed.length) {
-          const u = toUrl(parsed[0]);
-          if (u) return u;
-        }
-      } catch {
-        const u = toUrl(a.split(',')[0]);
-        if (u) return u;
-      }
-    }
-  }
   return '';
 }
 function pickDetail(i: any): string {
-  const v = i?.detail_url ?? i?.detailUrl ?? i?.url ?? i?.item_url ??
-    (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '');
+  const v = i?.detail_url ?? i?.detailUrl ?? i?.url ?? i?.item_url ?? (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '');
   return toUrl(v);
 }
 const toNum = (v: any): number | null => {
@@ -97,13 +73,13 @@ async function searchTaobao(img: string): Promise<Item[]> {
         cache: 'no-store',
       });
       if (!r.ok) {
-        if (r.status === 429 || r.status >= 500) { await new Promise(res => setTimeout(res, 400 + n * 250)); continue; }
+        if (r.status === 429 || r.status >= 500) { await new Promise(res => setTimeout(res, 300 + 200 * n)); continue; }
         return [];
       }
       const j = await r.json();
       return normalize(j?.result?.item ?? j?.data ?? []);
     } catch {
-      await new Promise(res => setTimeout(res, 350));
+      await new Promise(res => setTimeout(res, 300));
     }
   }
   return [];
@@ -124,43 +100,51 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       .select('row_id, src_img_url')
       .eq('session_id', sessionId)
       .order('order_no', { ascending: true });
+
     if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
 
     let processed = 0;
+    const t0 = Date.now();
+
     for (const row of rows ?? []) {
       const img = toUrl(row.src_img_url);
       if (!img) { processed++; continue; }
 
-      // 기존 후보 삭제
+      // 후보 삭제
       const del = await supabaseAdmin.from('candidates').delete().eq('row_id', row.row_id);
-      if (del.error) return NextResponse.json({ ok: false, error: `del_candidates: ${del.error.message}` }, { status: 500 });
+      if (del.error) return NextResponse.json({ ok: false, error: del.error.message }, { status: 500 });
 
+      // 검색
       const items = await searchTaobao(img);
 
+      // 저장
       if (items.length) {
-        // ⬇️ 실제 저장 확인(컬럼 불일치면 여기서 바로 에러가 납니다)
         const ins = await supabaseAdmin
           .from('candidates')
           .insert(items.map((it, idx) => ({
             row_id: row.row_id,
-            idx,                                // ← 정렬용 인덱스
-            img_url: it.img_url || '',          // ← 이미지 컬럼명 통일
+            idx,
+            img_url: it.img_url || '',
             detail_url: it.detail_url || '',
             price: it.price,
             promo_price: it.promo_price,
             sales: it.sales,
             seller: it.seller,
           })))
-          .select('row_id, idx, img_url');
+          .select('row_id');
 
-        if (ins.error) {
-          return NextResponse.json({ ok: false, error: `ins_candidates: ${ins.error.message}` }, { status: 500 });
-        }
+        if (ins.error) return NextResponse.json({ ok: false, error: ins.error.message }, { status: 500 });
       }
+
+      // ✅ 진행률을 위해 행 상태를 즉시 'done'으로
+      await supabaseAdmin.from('rows').update({ status: 'done' }).eq('row_id', row.row_id);
+
       processed++;
+      // 과도 호출 방지
+      await new Promise((r) => setTimeout(r, 200));
     }
 
-    return NextResponse.json({ ok: true, processed });
+    return NextResponse.json({ ok: true, processed, dur_ms: Date.now() - t0 });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message || 'prefetch_failed' }, { status: 500 });
   }
