@@ -28,6 +28,7 @@ type Row = {
   candidates?: Item[];
 };
 
+// 숫자 파싱(판매량)
 function salesToInt(s: string | null): number {
   if (!s) return -1;
   const t = s.toLowerCase().replace(/,/g, '').trim();
@@ -42,6 +43,8 @@ function salesToInt(s: string | null): number {
   if (u === 'k') n *= 1_000;
   return Math.round(n);
 }
+
+// URL 보정 + 프록시
 const https = (u?: string | null) => (u ? (u.startsWith('//') ? `https:${u}` : u) : '');
 const proxied = (u?: string | null) => {
   const s = https(u || '');
@@ -82,13 +85,13 @@ function WorkClient({ sessionId }: { sessionId: string }) {
   const [msg, setMsg] = useState('');
   const [bae, setBae] = useState('');
 
-  // rows 불러오기
+  // 행 목록 로드
   useEffect(() => {
     (async () => {
       setMsg('행 불러오는 중…');
       const r = await fetch(`/api/session/${sessionId}/rows`, {
         cache: 'no-store',
-        credentials: 'include', // 🔑 쿠키 포함
+        credentials: 'include',
       });
       const j = await r.json();
       if (j?.ok) {
@@ -100,12 +103,12 @@ function WorkClient({ sessionId }: { sessionId: string }) {
     })();
   }, [sessionId]);
 
-  // 현재 행 바뀌면 배대지 입력 값 세팅/리셋
+  // 현재 행 변경 시 배대지 값 세팅
   useEffect(() => {
     setBae(cur?.baedaji ? String((cur.baedaji | 0) / 1000) : '');
   }, [cur?.row_id]);
 
-  // 후보 보이면 판매량 최댓값 자동 선택
+  // 후보가 보이면 자동 선택(판매량 최대)
   useEffect(() => {
     if (!cur) return;
     if (cur.selected_idx != null) return;
@@ -139,7 +142,7 @@ function WorkClient({ sessionId }: { sessionId: string }) {
         skip: patch.skip ?? cur.skip ?? false,
         delete: patch.delete ?? cur.delete ?? false,
       }),
-      credentials: 'include', // 🔑
+      credentials: 'include',
     });
     const j = await r.json();
     if (!j?.ok) {
@@ -164,7 +167,7 @@ function WorkClient({ sessionId }: { sessionId: string }) {
       <h2 style={{ marginBottom: 16 }}>작업창 · 세션 {sessionId}</h2>
 
       <div style={{ display: 'flex', gap: 24 }}>
-        {/* 좌측 패널 */}
+        {/* 좌측: 원본/정보/컨트롤 */}
         <div style={{ flex: '0 0 340px' }}>
           <div style={{ padding: 12, background: '#f6f6f6', borderRadius: 8 }}>
             <div style={{ fontWeight: 700, marginBottom: 6 }}>{cur?.prev_name || '(이전상품명 없음)'}</div>
@@ -172,6 +175,7 @@ function WorkClient({ sessionId }: { sessionId: string }) {
             <div style={{ fontSize: 12, color: '#999' }}>행 {idx + 1} / {total}</div>
           </div>
 
+          {/* 원본 이미지: 프록시 → 실패 시 원본URL → 그래도 실패 시 no image */}
           <div style={{ marginTop: 12 }}>
             <div style={{ fontSize: 12, marginBottom: 6 }}>원본 이미지</div>
             <div
@@ -189,6 +193,8 @@ function WorkClient({ sessionId }: { sessionId: string }) {
               {cur?.src_img_url ? (
                 <img
                   src={proxied(cur.src_img_url)}
+                  loading="lazy"
+                  decoding="async"
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   alt="원본"
                   onError={(e) => {
@@ -219,10 +225,7 @@ function WorkClient({ sessionId }: { sessionId: string }) {
               onBlur={() => {
                 if (!bae) return;
                 const num = Number(bae);
-                if (Number.isNaN(num)) {
-                  setMsg('숫자만 입력');
-                  return;
-                }
+                if (Number.isNaN(num)) { setMsg('숫자만 입력'); return; }
                 saveRow({ baedaji: num * 1000 });
               }}
               placeholder="예: 3 → 3,000원"
@@ -248,11 +251,11 @@ function WorkClient({ sessionId }: { sessionId: string }) {
           <div style={{ marginTop: 8, color: '#666', minHeight: 20 }}>{msg}</div>
         </div>
 
-        {/* 우측: 후보 8개 */}
+        {/* 우측: 후보 8개 (프록시 + 폴백) */}
         <div style={{ flex: 1 }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
             {items.map((it, i) => {
-              const selected = cur?.selected_idx === i && !cur?.skip && !cur?.delete;
+              const selected = cur?.selected_idx === i && !cur?.delete && !cur?.skip;
               const price = it.promo_price ?? it.price;
               const imgSrc = proxied(it?.img_url || '');
               return (
@@ -281,6 +284,8 @@ function WorkClient({ sessionId }: { sessionId: string }) {
                     {imgSrc ? (
                       <img
                         src={imgSrc}
+                        loading="lazy"
+                        decoding="async"
                         style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                         alt={`candidate-${i}`}
                         onError={(e) => {
@@ -320,9 +325,7 @@ function WorkClient({ sessionId }: { sessionId: string }) {
                       {selected ? '선택해제' : '선택'}
                     </button>
                     <a href={https(it.detail_url) || '#'} target="_blank" rel="noreferrer">
-                      <button type="button" disabled={!it.detail_url}>
-                        열기
-                      </button>
+                      <button type="button" disabled={!it.detail_url}>열기</button>
                     </a>
                   </div>
                 </div>
