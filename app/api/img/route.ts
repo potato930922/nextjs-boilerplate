@@ -88,4 +88,6 @@ export async function GET(req: NextRequest) {
     }
     return new NextResponse('bad upstream', { status: 502 });
   } catch (e: any) {
-    retur
+    return new NextResponse(e?.message || 'proxy_error', { status: 500 });
+  }
+}
