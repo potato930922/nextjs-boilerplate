@@ -83,12 +83,13 @@ export default function IngestClient() {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ purge: true, rows }),
         cache: 'no-store',
+        credentials: 'include',
       });
       const j = await r.json().catch(() => ({}));
       if (!r.ok || !j.ok) { setBusy(false); setMsg(`업로드 실패: ${j.error || r.status}`); return; }
 
       setMsg('이미지 서칭 시작…');
-      const pf = await fetch(`/api/session/${encodeURIComponent(sid)}/prefetch`, { method: 'POST', cache: 'no-store' });
+      const pf = await fetch(`/api/session/${encodeURIComponent(sid)}/prefetch`, { method: 'POST', cache: 'no-store', credentials: 'include', });
       const pj = await pf.json().catch(() => ({}));
       if (!pf.ok || !pj.ok) { setBusy(false); setMsg(`프리페치 시작 실패: ${pj.error || pf.status}`); return; }
 
