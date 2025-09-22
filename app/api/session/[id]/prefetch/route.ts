@@ -4,161 +4,126 @@ import { cookies } from 'next/headers';
 import { verifyToken } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+const CONCURRENCY = 4;
 
-const HOST = 'taobao-advanced.p.rapidapi.com';
-const URL_LOW = `https://${HOST}/item_image_search`;
-const KEY_LOW = process.env.RAPIDAPI_TAOBAO_KEY_LOW || '';
-
-const https = (u: string) => (u?.startsWith('//') ? `https:${u}` : (u || ''));
-
-const toNum = (v: any): number | null => {
-  if (v === null || v === undefined) return null;
-  const s = String(v).trim();
-  if (!s || s === 'null') return null;
-  const n = Number(s.replace(/[^\d.]/g, ''));
-  return Number.isFinite(n) ? n : null;
-};
-
-type Cand = {
-  idx: number;
+type Item = {
   img_url: string;
-  detail_url: string;
-  price: number | null;
   promo_price: number | null;
+  price: number | null;
   sales: string | null;
   seller: string | null;
+  detail_url: string;
 };
 
-function pickList(j: any): any[] {
-  if (!j || typeof j !== 'object') return [];
-  return (
-    j?.result?.items ??
-    j?.result?.item ??
-    j?.data?.items ??
-    j?.data ??
-    j?.items ??
-    []
-  );
-}
+const https = (u?: string) => (u ? (u.startsWith('//') ? `https:${u}` : u) : '');
 
-function normalize(raw: any): Cand[] {
-  const arr = Array.isArray(raw) ? raw.slice(0, 8) : [];
-  const items = arr.map((i: any, idx: number) => {
-    const img = i?.pic ?? i?.pic_url ?? i?.pict_url ?? i?.image ?? i?.img ?? (Array.isArray(i?.small_images) ? i.small_images[0] : '');
-    const detail = i?.detail_url ?? i?.url ?? i?.detailUrl ?? i?.item_url ?? (i?.num_iid ? `https://item.taobao.com/item.htm?id=${i.num_iid}` : '');
-    const promo = i?.promotion_price ?? i?.promo_price ?? i?.zk_final_price;
-    const price = i?.price ?? i?.reserve_price ?? i?.orgPrice ?? i?.view_price ?? promo;
-    const sales = i?.sales ?? i?.view_sales ?? i?.volume ?? i?.sold ?? i?.sold_quantity ?? null;
-    const seller = i?.seller_nick ?? i?.nick ?? i?.seller ?? i?.shop_title ?? null;
-
-    return {
-      idx,
-      img_url: https(String(img || '')),
-      detail_url: https(String(detail || '')),
-      price: toNum(price),
-      promo_price: toNum(promo),
-      sales: sales ? String(sales) : null,
-      seller: seller ? String(seller) : null,
-    };
-  });
-
-  while (items.length < 8) {
-    items.push({ idx: items.length, img_url:'', detail_url:'', price:null, promo_price:null, sales:null, seller:null });
-  }
-  return items;
-}
-
-async function taobaoLow(img: string) {
-  const u = new URL(URL_LOW);
-  u.searchParams.set('img', https(img));
-  const r = await fetch(u, {
-    headers: {
-      'X-RapidAPI-Key': KEY_LOW,
-      'X-RapidAPI-Host': HOST,
-      'Accept': 'application/json',
-      'User-Agent': 'dalae-taobao/1.0',
-    },
+async function taobao(img: string): Promise<Item[]> {
+  const r = await fetch(`${process.env.NEXT_PUBLIC_BASE_URL || ''}/api/taobao/search`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ img }),
     cache: 'no-store',
   });
-  const text = await r.text();
-  if (!r.ok) throw new Error(`upstream_${r.status}:${text.slice(0, 300)}`);
-  let j: any = {};
-  try { j = JSON.parse(text); } catch {}
-  return pickList(j);
+  if (!r.ok) return [];
+  const j = await r.json();
+  return Array.isArray(j?.items) ? j.items : [];
 }
 
-// params/cookies는 Promise 타입(네 프로젝트 규칙)
-export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
-  const { id: sessionId } = await ctx.params;
-
-  const store = await cookies();
-  const token = store.get('s_token')?.value;
-  const payload = verifyToken(token);
-  if (!payload || payload.session_id !== sessionId) {
-    return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
-  }
-  if (!KEY_LOW) {
-    return NextResponse.json({ ok: false, error: 'no_low_key' }, { status: 500 });
-  }
-
-  const { data: rows, error } = await supabaseAdmin
-    .from('rows')
-    .select('row_id, src_img_url')
-    .eq('session_id', sessionId)
-    .order('order_no');
-
-  if (error) return NextResponse.json({ ok:false, error:error.message }, { status:500 });
-
-  let processed = 0;
-  let ready = 0;
-  const debug: any[] = [];
-
-  for (const row of rows ?? []) {
-    const img = row.src_img_url ?? '';
-    if (!img) {
-      // 원본 이미지 없으면 빈 상태로 표기
-      await supabaseAdmin.from('rows').update({ status: 'empty' }).eq('row_id', row.row_id);
-      continue;
-    }
-
-    // 기존 후보 삭제
-    const del = await supabaseAdmin.from('candidates').delete().eq('row_id', row.row_id);
-    if (del.error) {
-      debug.push({ row_id: row.row_id, err: 'cand_delete_failed', detail: del.error.message });
-      // 실패해도 진행률을 막지는 않음
-    }
-
-    try {
-      const list = await taobaoLow(img);
-      const items = normalize(list).filter(it => it.img_url || it.detail_url);
-
-      if (items.length) {
-        const ins = await supabaseAdmin.from('candidates').insert(
-          items.map((it) => ({ row_id: row.row_id, ...it }))
-        );
-        if (ins.error) {
-          debug.push({ row_id: row.row_id, err: 'cand_insert_failed', detail: ins.error.message });
-          await supabaseAdmin.from('rows').update({ status: 'error' }).eq('row_id', row.row_id);
-        } else {
-          // ✅ 이미지 서칭 완료 표시
-          await supabaseAdmin.from('rows').update({ status: 'ready' }).eq('row_id', row.row_id);
-          ready++;
+function pLimit<T>(concurrency: number) {
+  let active = 0;
+  const queue: (() => void)[] = [];
+  const next = () => {
+    active--;
+    queue.shift()?.();
+  };
+  return async (fn: () => Promise<T>) =>
+    new Promise<T>((resolve, reject) => {
+      const run = async () => {
+        active++;
+        try {
+          resolve(await fn());
+        } catch (e) {
+          reject(e);
+        } finally {
+          next();
         }
-      } else {
-        // 결과 없음
-        await supabaseAdmin.from('rows').update({ status: 'empty' }).eq('row_id', row.row_id);
-      }
-    } catch (e: any) {
-      debug.push({ row_id: row.row_id, err: 'fetch_failed', detail: e?.message || String(e) });
-      await supabaseAdmin.from('rows').update({ status: 'error' }).eq('row_id', row.row_id);
+      };
+      if (active < concurrency) run();
+      else queue.push(run);
+    });
+}
+
+export async function POST(req: NextRequest, ctx: { params: { id: string } }) {
+  try {
+    const sessionId = ctx.params.id;
+
+    // 인증
+    const store = await cookies();
+    const token = store.get('s_token')?.value;
+    const payload = verifyToken(token);
+    if (!payload || payload.session_id !== sessionId) {
+      return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
     }
 
-    processed++;
-    await new Promise(r => setTimeout(r, 250));
-  }
+    // 대상 행 조회
+    const { data: rows, error: rowsErr } = await supabaseAdmin
+      .from('rows')
+      .select('row_id, session_id, src_img_url')
+      .eq('session_id', sessionId)
+      .order('order_no', { ascending: true });
 
-  return NextResponse.json({ ok: true, session_id: sessionId, processed, ready, debug }, { status: 200 });
+    if (rowsErr) return NextResponse.json({ ok: false, error: rowsErr.message }, { status: 500 });
+
+    const total = rows?.length || 0;
+    if (!total) return NextResponse.json({ ok: true, processed: 0, dur_ms: 0 });
+
+    const started = Date.now();
+    const limit = pLimit<void>(CONCURRENCY);
+    let done = 0;
+
+    const jobs = (rows || []).map((row) =>
+      limit(async () => {
+        const img = row.src_img_url ? https(row.src_img_url) : '';
+        if (!img) return;
+
+        // 후보 삭제
+        await supabaseAdmin.from('candidates').delete().eq('row_id', row.row_id);
+
+        // 2회 재시도
+        let items: Item[] = [];
+        for (let n = 0; n < 3; n++) {
+          try {
+            items = await taobao(img);
+            break;
+          } catch {
+            await new Promise((r) => setTimeout(r, 300 + n * 200));
+          }
+        }
+
+        if (items.length) {
+          await supabaseAdmin.from('candidates').insert(
+            items.map((it, idx) => ({
+              row_id: row.row_id,
+              idx,
+              img_url: it.img_url || '',
+              detail_url: it.detail_url || '',
+              price: it.price,
+              promo_price: it.promo_price,
+              sales: it.sales,
+              seller: it.seller,
+            }))
+          );
+        }
+        // 진행률을 위한 "완료" 기준은 행 단위로 증가
+        done++;
+      })
+    );
+
+    await Promise.allSettled(jobs);
+
+    const dur_ms = Date.now() - started;
+    return NextResponse.json({ ok: true, session_id: sessionId, processed: done, total, dur_ms });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message || 'prefetch_failed' }, { status: 500 });
+  }
 }
