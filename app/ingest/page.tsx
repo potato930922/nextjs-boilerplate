@@ -1,14 +1,12 @@
 // app/ingest/page.tsx
-import { Suspense } from 'react';
+import SessionGate from '@/app/components/SessionGate';
 import IngestClient from './IngestClient';
 
-// 프리렌더 시 CSR 훅 때문에 빌드가 막히지 않게
-export const dynamic = 'force-dynamic';
-
-export default function Page() {
+export default function Page({ searchParams }: { searchParams: { sid?: string } }) {
+  const sid = searchParams.sid ?? '';
   return (
-    <Suspense fallback={<div style={{ padding: 24 }}>로딩 중…</div>}>
+    <SessionGate sessionId={sid}>
       <IngestClient />
-    </Suspense>
+    </SessionGate>
   );
 }
