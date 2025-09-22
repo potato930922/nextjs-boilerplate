@@ -1,8 +1,8 @@
 // app/work/[id]/page.tsx
 'use client';
 
-import SessionGate from '@/app/components/SessionGate';
 import { useEffect, useMemo, useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 type Item = {
   img_url: string;
@@ -43,32 +43,26 @@ function salesToInt(s: string | null): number {
   return Math.round(n);
 }
 
-// URL 보정 + 프록시
-const toUrl = (u?: string | null) => {
-  const s = (u || '').trim();
-  if (!s) return '';
-  if (s.startsWith('//')) return 'https:' + s;
-  if (/^https?:\/\//i.test(s)) return s;
-  if (/^[a-z0-9.-]+\//i.test(s)) return 'https://' + s;
-  return s;
-};
-const proxied = (u?: string | null) => {
-  const s = toUrl(u);
-  return s ? `/api/img?u=${encodeURIComponent(s)}` : '';
+const https = (u?: string | null) => {
+  if (!u) return '';
+  return u.startsWith('//') ? `https:${u}` : u;
 };
 
-export default function Page({ params }: { params: { id: string } }) {
+// 프록시 src
+const proxy = (u?: string | null) => {
+  const h = https(u || '');
+  return h ? `/api/img?u=${encodeURIComponent(h)}` : '';
+};
+
+export default function WorkPage({ params }: { params: { id: string } }) {
   const sessionId = params.id;
-  return (
-    <SessionGate sessionId={sessionId}>
-      <WorkClient sessionId={sessionId} />
-    </SessionGate>
-  );
-}
+  const router = useRouter();
 
-function WorkClient({ sessionId }: { sessionId: string }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [idx, setIdx] = useState(0);
+  const [msg, setMsg] = useState('');
+  const [bae, setBae] = useState('');
+
   const cur = rows[idx];
   const total = rows.length;
 
@@ -76,21 +70,22 @@ function WorkClient({ sessionId }: { sessionId: string }) {
     () =>
       (cur?.candidates ?? new Array(8).fill(null)).map(
         (v) =>
-          v ?? { img_url: '', promo_price: null, price: null, sales: null, seller: null, detail_url: '' }
+          v ?? {
+            img_url: '',
+            promo_price: null,
+            price: null,
+            sales: null,
+            seller: null,
+            detail_url: '',
+          }
       ),
-    [cur?.row_id, cur?.candidates]
+    [cur?.row_id]
   );
-
-  const [msg, setMsg] = useState('');
-  const [bae, setBae] = useState('');
 
   useEffect(() => {
     (async () => {
       setMsg('행 불러오는 중…');
-      const r = await fetch(`/api/session/${sessionId}/rows`, {
-        cache: 'no-store',
-        credentials: 'include',
-      });
+      const r = await fetch(`/api/session/${sessionId}/rows`, { cache: 'no-store' });
       const j = await r.json();
       if (j?.ok) {
         setRows(j.rows as Row[]);
@@ -138,13 +133,13 @@ function WorkClient({ sessionId }: { sessionId: string }) {
         skip: patch.skip ?? cur.skip ?? false,
         delete: patch.delete ?? cur.delete ?? false,
       }),
-      credentials: 'include',
     });
     const j = await r.json();
     if (!j?.ok) {
       setMsg(`저장 실패: ${j?.error || r.status}`);
       return;
     }
+
     setRows((old) => {
       const n = [...old];
       n[idx] = { ...cur, ...patch };
@@ -162,7 +157,6 @@ function WorkClient({ sessionId }: { sessionId: string }) {
       <h2 style={{ marginBottom: 16 }}>작업창 · 세션 {sessionId}</h2>
 
       <div style={{ display: 'flex', gap: 24 }}>
-        {/* 좌측 */}
         <div style={{ flex: '0 0 340px' }}>
           <div style={{ padding: 12, background: '#f6f6f6', borderRadius: 8 }}>
             <div style={{ fontWeight: 700, marginBottom: 6 }}>{cur?.prev_name || '(이전상품명 없음)'}</div>
@@ -174,30 +168,23 @@ function WorkClient({ sessionId }: { sessionId: string }) {
             <div style={{ fontSize: 12, marginBottom: 6 }}>원본 이미지</div>
             <div
               style={{
-                width: '100%', aspectRatio: '1/1', background: '#f3f3f3',
-                borderRadius: 8, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                width: '100%',
+                aspectRatio: '1/1',
+                background: '#f3f3f3',
+                borderRadius: 8,
+                overflow: 'hidden',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
               }}
             >
               {cur?.src_img_url ? (
                 <img
-                  src={proxied(cur.src_img_url)}
+                  src={proxy(cur.src_img_url)}
                   loading="lazy"
-                  decoding="async"
+                  referrerPolicy="no-referrer"
                   style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   alt="원본"
-                  onError={(e) => {
-                    const el = e.currentTarget as HTMLImageElement;
-                    if (el.dataset.fallback !== '1') {
-                      el.dataset.fallback = '1';
-                      el.src = toUrl(cur?.src_img_url || '');
-                      return;
-                    }
-                    el.style.display = 'none';
-                    const box = el.parentElement as HTMLElement;
-                    box.style.justifyContent = 'center';
-                    box.innerText = 'no image';
-                    box.style.color = '#bbb';
-                  }}
                 />
               ) : (
                 <span style={{ color: '#bbb' }}>원본 이미지 없음</span>
@@ -222,16 +209,22 @@ function WorkClient({ sessionId }: { sessionId: string }) {
           </div>
 
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-            <button onClick={() => { if (idx > 0) setIdx(idx - 1); }} disabled={idx === 0}>이전</button>
-            <button onClick={() => { if (idx < total - 1) setIdx(idx + 1); }} disabled={idx === total - 1}>다음</button>
-            <button onClick={exportExcel} disabled={!rows.length}>완료(엑셀 다운로드)</button>
+            <button type="button" onClick={() => { if (idx > 0) { setIdx(idx - 1); setBae(''); } }} disabled={idx === 0}>
+              이전
+            </button>
+            <button type="button" onClick={() => { if (idx < total - 1) { setIdx(idx + 1); setBae(''); } }} disabled={idx === total - 1}>
+              다음
+            </button>
+            <button type="button" onClick={exportExcel} disabled={!rows.length}>
+              완료(엑셀 다운로드)
+            </button>
           </div>
 
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-            <button onClick={() => saveRow({ skip: !cur?.skip, delete: false, selected_idx: null })}>
+            <button type="button" onClick={() => saveRow({ skip: !cur?.skip, delete: false, selected_idx: null })}>
               {cur?.skip ? '적합상품없음 ✅' : '적합상품없음'}
             </button>
-            <button onClick={() => saveRow({ delete: !cur?.delete, skip: false, selected_idx: null })}>
+            <button type="button" onClick={() => saveRow({ delete: !cur?.delete, skip: false, selected_idx: null })}>
               {cur?.delete ? '삭제 예정상품 ✅' : '삭제 예정상품'}
             </button>
           </div>
@@ -239,41 +232,32 @@ function WorkClient({ sessionId }: { sessionId: string }) {
           <div style={{ marginTop: 8, color: '#666', minHeight: 20 }}>{msg}</div>
         </div>
 
-        {/* 우측: 후보 8개 */}
         <div style={{ flex: 1 }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
             {items.map((it, i) => {
-              const selected = cur?.selected_idx === i && !cur?.delete && !cur?.skip;
+              const selected = cur?.selected_idx === i && !cur?.skip && !cur?.delete;
               const price = it.promo_price ?? it.price;
-              const imgSrc = proxied(it?.img_url || '');
               return (
                 <div key={i} style={{ border: '2px solid', borderColor: selected ? '#ff5a5a' : '#eee', borderRadius: 10, padding: 8, background: '#fff' }}>
                   <div
                     style={{
-                      width: '100%', aspectRatio: '1/1', background: '#f3f3f3',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden', borderRadius: 8,
+                      width: '100%',
+                      aspectRatio: '1/1',
+                      background: '#f3f3f3',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      overflow: 'hidden',
+                      borderRadius: 8,
                     }}
                   >
-                    {imgSrc ? (
+                    {it?.img_url ? (
                       <img
-                        src={imgSrc}
+                        src={proxy(it.img_url)}
                         loading="lazy"
-                        decoding="async"
+                        referrerPolicy="no-referrer"
                         style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                         alt={`candidate-${i}`}
-                        onError={(e) => {
-                          const el = e.currentTarget as HTMLImageElement;
-                          if (el.dataset.fallback !== '1') {
-                            el.dataset.fallback = '1';
-                            el.src = toUrl(it?.img_url || '');
-                            return;
-                          }
-                          el.style.display = 'none';
-                          const box = el.parentElement as HTMLElement;
-                          box.style.justifyContent = 'center';
-                          box.innerText = 'no image';
-                          box.style.color = '#bbb';
-                        }}
                       />
                     ) : (
                       <span style={{ color: '#bbb' }}>no image</span>
@@ -288,10 +272,10 @@ function WorkClient({ sessionId }: { sessionId: string }) {
                   </div>
 
                   <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                    <button onClick={() => saveRow({ selected_idx: selected ? null : i, skip: false, delete: false })}>
+                    <button type="button" onClick={() => saveRow({ selected_idx: selected ? null : i, skip: false, delete: false })}>
                       {selected ? '선택해제' : '선택'}
                     </button>
-                    <a href={toUrl(it.detail_url) || '#'} target="_blank" rel="noreferrer">
+                    <a href={https(it.detail_url) || '#'} target="_blank" rel="noreferrer">
                       <button type="button" disabled={!it.detail_url}>열기</button>
                     </a>
                   </div>
