@@ -50,3 +50,52 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     if (!rows?.length) return NextResponse.json({ ok: true, rows: [] });
 
     const rowIds = rows.map((r) => r.row_id);
+
+    const { data: cs, error: candErr } = await supabaseAdmin
+      .from('candidates')
+      .select('row_id, idx, img_url, detail_url, price, promo_price, sales, seller')
+      .in('row_id', rowIds)
+      .order('row_id', { ascending: true })
+      .order('idx', { ascending: true });
+
+    if (candErr) return NextResponse.json({ ok: false, error: candErr.message }, { status: 500 });
+
+    const map = new Map<number, Item[]>();
+    for (const c of cs ?? []) {
+      const arr = map.get(c.row_id) ?? [];
+      const pos = typeof c.idx === 'number' ? c.idx : arr.length;
+      arr[pos] = {
+        img_url: toUrl(c.img_url || ''),
+        detail_url: toUrl(c.detail_url || ''),
+        price: c.price ?? null,
+        promo_price: c.promo_price ?? null,
+        sales: (c.sales as any) ?? null,
+        seller: (c.seller as any) ?? null,
+      };
+      map.set(c.row_id, arr);
+    }
+
+    const out = rows.map((r) => {
+      const arr = (map.get(r.row_id) ?? []).slice(0, 8);
+      while (arr.length < 8) arr.push(blankItem());
+      return {
+        row_id: r.row_id,
+        order_no: r.order_no,
+        prev_name: r.prev_name,
+        category: r.category,
+        src_img_url: toUrl(r.src_img_url),
+        main_thumb_url: toUrl(r.main_thumb_url),
+        selected_idx: r.selected_idx,
+        baedaji: r.baedaji,
+        skip: r.skip,
+        delete: r.delete,
+        status: r.status,
+        candidates: arr,
+      };
+    });
+
+    return NextResponse.json({ ok: true, rows: out });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message || 'rows_failed' }, { status: 500 });
+  }
+}
