@@ -4,16 +4,21 @@ import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function https(u: string) {
-  if (!u) return '';
-  return u.startsWith('//') ? 'https:' + u : u;
+function safeDecode(u: string) {
+  try { return decodeURIComponent(u); } catch { return u; }
 }
-function refererFor(url: URL) {
-  const h = url.hostname;
-  if (h.includes('tmall.com')) return 'https://detail.tmall.com/';
-  if (h.includes('taobao.com')) return 'https://item.taobao.com/';
-  if (h.includes('alicdn.com')) return 'https://item.taobao.com/';
-  // 기본값 – 굳이 우리 도메인을 넣지 말기
+function toHttps(u: string) {
+  if (!u) return '';
+  const s = u.trim();
+  if (!s) return '';
+  if (s.startsWith('//')) return 'https:' + s;
+  if (/^https?:\/\//i.test(s)) return s.replace(/^http:\/\//i, 'https://');
+  return 'https://' + s;
+}
+function pickReferer(hostname: string) {
+  if (hostname.includes('tmall.com')) return 'https://detail.tmall.com/';
+  if (hostname.includes('taobao.com')) return 'https://item.taobao.com/';
+  if (hostname.includes('alicdn.com')) return 'https://item.taobao.com/';
   return 'https://item.taobao.com/';
 }
 
@@ -22,44 +27,45 @@ export async function GET(req: NextRequest) {
   if (!raw) return new NextResponse('missing u', { status: 400 });
 
   try {
-    const target = new URL(https(raw));
+    // URL 보정 (이중 인코딩/스킴 누락 방지)
+    const normalized = toHttps(safeDecode(raw));
+    const target = new URL(normalized);
 
     const r = await fetch(target, {
-      // 중요: 일부 CDN은 리퍼러가 없으면 403/500을 냄
+      redirect: 'follow',
+      // 일부 CDN이 Referer/UA/Accept-Language 없으면 차단
       headers: {
-        Referer: refererFor(target),
-        // 이미지 요청처럼 보이도록 Accept 맞추기
+        Referer: pickReferer(target.hostname),
         Accept: 'image/avif,image/webp,image/*,*/*;q=0.8',
-        // 일부 CDN은 UA 체크함
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,ko;q=0.7',
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
-        // 언어 헤더가 없어서 막는 경우 방지
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,ko;q=0.7',
       },
-      redirect: 'follow',
       cache: 'no-store',
     });
 
     if (!r.ok) {
+      // 업스트림 사유를 그대로 보여줘서 디버깅 쉽게
       const text = await r.text().catch(() => '');
       return new NextResponse(
-        `upstream_${r.status}${text ? `\n${text.slice(0, 200)}` : ''}`,
+        `upstream_${r.status}${text ? `\n${text.slice(0, 300)}` : ''}`,
         { status: 502 }
       );
     }
 
+    // ✅ 스트리밍으로 바로 전송 (arrayBuffer 사용 안 함)
     const ct = r.headers.get('content-type') || 'image/jpeg';
-    const buf = await r.arrayBuffer();
-
-    return new NextResponse(buf, {
+    return new NextResponse(r.body, {
       status: 200,
       headers: {
         'content-type': ct,
-        // 너무 길게 캐시하면 디버깅 어려움
         'cache-control': 'public, max-age=600',
       },
     });
   } catch (e: any) {
-    return new NextResponse(`proxy_error: ${e?.message || 'unknown'}`, { status: 500 });
+    return new NextResponse(
+      `proxy_error: ${e?.message || String(e)}`.slice(0, 400),
+      { status: 500 }
+    );
   }
 }
