@@ -6,8 +6,18 @@ export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 const https = (u: string) => (u?.startsWith('//') ? `https:${u}` : (u || ''));
-const pickReferer = (u: string) =>
-  u.includes('tmall') ? 'https://detail.tmall.com/' : 'https://item.taobao.com/';
+
+function pickReferer(url: string) {
+  try {
+    const h = new URL(url).hostname;
+    if (h.endsWith('tmall.com')) return 'https://detail.tmall.com/';
+    if (h.endsWith('taobao.com')) return 'https://item.taobao.com/';
+    if (h.endsWith('alicdn.com')) return 'https://item.taobao.com/'; // 알리 CDN은 보통 타오바오 리퍼러 허용
+    return 'https://item.taobao.com/';
+  } catch {
+    return 'https://item.taobao.com/';
+  }
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -16,7 +26,12 @@ export async function GET(req: NextRequest) {
 
     const url = https(u);
     const r = await fetch(url, {
-      headers: { Referer: pickReferer(url) }, // 🔑 레퍼러 강제
+      headers: {
+        Referer: pickReferer(url),
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36',
+        Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+      },
       cache: 'no-store',
     });
 
@@ -27,7 +42,14 @@ export async function GET(req: NextRequest) {
 
     const ctype = r.headers.get('content-type') || 'image/jpeg';
     const buf = Buffer.from(await r.arrayBuffer());
-    return new NextResponse(buf, { status: 200, headers: { 'Content-Type': ctype, 'Cache-Control': 'no-store' } });
+    return new NextResponse(buf, {
+      status: 200,
+      headers: {
+        'Content-Type': ctype,
+        'Cache-Control': 'no-store',
+        'Content-Disposition': 'inline',
+      },
+    });
   } catch (e: any) {
     return new NextResponse(e?.message || 'proxy_error', { status: 500 });
   }
