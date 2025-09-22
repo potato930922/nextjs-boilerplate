@@ -19,7 +19,7 @@ type Item = {
 
 const https = (u?: string) => (u ? (u.startsWith('//') ? `https:${u}` : u) : '');
 
-// 내부 taobao 프록시 호출 (현재 앱의 오리진 사용)
+// 내부 taobao 프록시 호출 (현재 오리진 사용)
 async function taobao(origin: string, img: string): Promise<Item[]> {
   const r = await fetch(`${origin}/api/taobao/search`, {
     method: 'POST',
@@ -62,8 +62,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     // ✅ Next.js 15: params는 Promise
     const { id: sessionId } = await ctx.params;
 
-    // ✅ cookies()는 동기 API
-    const token = cookies().get('s_token')?.value;
+    // ✅ 여기서 cookies()는 Promise이므로 await 필요
+    const store = await cookies();
+    const token = store.get('s_token')?.value;
     const payload = verifyToken(token);
 
     if (!payload || payload.session_id !== sessionId) {
@@ -125,7 +126,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
           );
         }
 
-        // 진행률을 위해 행 단위 완료 카운트
+        // 진행률: 행 단위 완료
         done++;
       })
     );
