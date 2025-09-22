@@ -30,35 +30,42 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   try {
     const { id: sessionId } = await ctx.params;
 
-    const token = (await cookies()).get('s_token')?.value;
+    // 인증
+    const store = await cookies();
+    const token = store.get('s_token')?.value;
     const payload = verifyToken(token);
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
     }
 
+    // rows
     const { data: rows, error: rowsErr } = await supabaseAdmin
       .from('rows')
       .select('row_id, order_no, prev_name, category, src_img_url, main_thumb_url, selected_idx, baedaji, skip, delete, status')
       .eq('session_id', sessionId)
       .order('order_no', { ascending: true });
+
     if (rowsErr) return NextResponse.json({ ok: false, error: rowsErr.message }, { status: 500 });
     if (!rows?.length) return NextResponse.json({ ok: true, rows: [] });
 
     const rowIds = rows.map(r => r.row_id);
 
-    // ⬇️ 컬럼명이 환경마다 다른 것을 흡수하기 위해 모든 후보 컬럼을 가져온 뒤 JS에서 coalesce
+    // candidates: *로 받아서 실제 존재하는 키만 사용 (여기서 더는 '없는 컬럼' 에러가 안 남)
     const { data: cand, error: candErr } = await supabaseAdmin
       .from('candidates')
-      .select('row_id, idx, img_url, img, image_url, pict_url, pic_url, detail_url, url, item_url, price, promo_price, sales, seller')
+      .select('*')
       .in('row_id', rowIds)
       .order('row_id', { ascending: true })
       .order('idx', { ascending: true });
+
     if (candErr) return NextResponse.json({ ok: false, error: candErr.message }, { status: 500 });
 
+    // row_id -> items[]
     const byRow = new Map<number, Item[]>();
     for (const c of cand ?? []) {
+      // 존재하는 필드들 중에서 우선순위 합성
       const img =
-        c.img_url || c.img || c.image_url || c.pict_url || c.pic_url || '';
+        c.img_url || c.img || c.image_url || c.pict_url || c.pic_url || c.picture || c.thumbnail || '';
       const detail =
         c.detail_url || c.url || c.item_url || '';
       const arr = byRow.get(c.row_id) ?? [];
