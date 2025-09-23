@@ -1,6 +1,5 @@
 // app/api/session/[id]/export/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import * as XLSX from 'xlsx';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyToken } from '@/lib/auth';
 
@@ -8,13 +7,13 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 type Candidate = {
+  idx: number | null;
   img_url: string | null;
   detail_url: string | null;
   price: number | null;
   promo_price: number | null;
   sales: string | null;
   seller: string | null;
-  idx?: number | null;
 };
 
 export async function GET(
@@ -23,14 +22,14 @@ export async function GET(
 ) {
   const sessionId = params.id;
 
-  // 인증 (세션 쿠키 s_token 확인)
+  // 인증
   const token = req.cookies.get('s_token')?.value;
   const payload = verifyToken(token);
   if (!payload || payload.session_id !== sessionId) {
     return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
   }
 
-  // rows + 선택된 candidate 조인
+  // 데이터 조회 (rows + candidates)
   const { data: rows, error } = await supabaseAdmin
     .from('rows')
     .select(
@@ -47,55 +46,85 @@ export async function GET(
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
-  // 워크시트용 배열 만들기
-  const out = [
-    [
-      '순번',
-      '이전상품명',
-      '카테고리',
-      '원본이미지',
-      '선택 인덱스',
-      '판매자',
-      '판매량',
-      '가격(정가)',
-      '가격(프로모션)',
-      '상세링크',
-      '배대지',
-      '비고(skip/delete)',
-    ],
-  ] as (string | number | null)[][];
+  // 🔸 동적 import (Turbopack/Edge 번들 이슈 회피)
+  const XLSXMod = await import('xlsx');
+  const XLSX = XLSXMod?.default ?? XLSXMod;
+
+  // 시트 헤더
+  const header = [
+    '순번',
+    '이전상품명',
+    '카테고리',
+    '원본이미지',
+    '선택 인덱스',
+    '판매자',
+    '판매량',
+    '가격(정가)',
+    '가격(프로모션)',
+    '상세링크',
+    '배대지',
+    '비고(skip/delete)',
+  ];
+
+  // rows → 2차원 배열
+  const aoa: any[][] = [header];
 
   for (const r of rows ?? []) {
-    const cand: Candidate | undefined =
-      Array.isArray(r.candidates) && typeof r.selected_idx === 'number'
-        ? (r.candidates as Candidate[]).find((c) => c.idx === r.selected_idx)
+    const cands = (r as any).candidates as Candidate[] | null;
+    const selected =
+      Array.isArray(cands) && typeof r.selected_idx === 'number'
+        ? cands.find((c) => c.idx === r.selected_idx)
         : undefined;
 
     const remark =
-      (r.skip ? '[적합상품없음]' : '') + (r.delete ? (r.skip ? ' + ' : '') + '[삭제예정]' : '');
+      (r.skip ? '[적합상품없음]' : '') +
+      (r.delete ? (r.skip ? ' + ' : '') + '[삭제예정]' : '');
 
-    out.push([
+    aoa.push([
       r.order_no ?? '',
       r.prev_name ?? '',
       r.category ?? '',
       r.src_img_url ?? '',
-      r.selected_idx ?? null,
-      cand?.seller ?? '',
-      cand?.sales ?? '',
-      cand?.price ?? null,
-      cand?.promo_price ?? null,
-      cand?.detail_url ?? '',
-      r.baedaji ?? null,
+      r.selected_idx ?? '',
+      selected?.seller ?? '',
+      selected?.sales ?? '',
+      selected?.price ?? '',
+      selected?.promo_price ?? '',
+      selected?.detail_url ?? '',
+      r.baedaji ?? '',
       remark || '',
     ]);
   }
 
-  // XLSX 생성
+  // 워크북/시트 생성
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(out);
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  // 열 너비 살짝 지정(가독성)
+  (ws as any)['!cols'] = [
+    { wch: 6 },  // 순번
+    { wch: 28 }, // 이전상품명
+    { wch: 18 }, // 카테고리
+    { wch: 40 }, // 원본이미지
+    { wch: 10 }, // 선택 인덱스
+    { wch: 18 }, // 판매자
+    { wch: 10 }, // 판매량
+    { wch: 12 }, // 가격(정가)
+    { wch: 14 }, // 가격(프로모션)
+    { wch: 42 }, // 상세링크
+    { wch: 10 }, // 배대지
+    { wch: 16 }, // 비고
+  ];
+
   XLSX.utils.book_append_sheet(wb, ws, 'results');
 
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  // Node에서 ArrayBuffer로 쓰기
+  const ab = XLSX.write(wb, {
+    type: 'array',
+    bookType: 'xlsx',
+  }) as ArrayBuffer;
+
+  const buf = Buffer.from(ab);
 
   return new NextResponse(buf, {
     status: 200,
