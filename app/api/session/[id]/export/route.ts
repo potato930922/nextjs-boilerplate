@@ -18,9 +18,9 @@ type Candidate = {
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { id: string } }
+  ctx: { params: Promise<{ id: string }> } // ✅ Next.js 15: params는 Promise
 ) {
-  const sessionId = params.id;
+  const { id: sessionId } = await ctx.params; // ✅ await 필요
 
   // 인증
   const token = req.cookies.get('s_token')?.value;
@@ -29,7 +29,7 @@ export async function GET(
     return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
   }
 
-  // 데이터 조회 (rows + candidates)
+  // 데이터 조회
   const { data: rows, error } = await supabaseAdmin
     .from('rows')
     .select(
@@ -46,9 +46,9 @@ export async function GET(
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
-  // 🔸 동적 import (Turbopack/Edge 번들 이슈 회피)
+  // 🔸 동적 import (번들 이슈 회피)
   const XLSXMod = await import('xlsx');
-  const XLSX = XLSXMod?.default ?? XLSXMod;
+  const XLSX = (XLSXMod as any).default ?? XLSXMod;
 
   // 시트 헤더
   const header = [
@@ -66,7 +66,6 @@ export async function GET(
     '비고(skip/delete)',
   ];
 
-  // rows → 2차원 배열
   const aoa: any[][] = [header];
 
   for (const r of rows ?? []) {
@@ -96,34 +95,27 @@ export async function GET(
     ]);
   }
 
-  // 워크북/시트 생성
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-  // 열 너비 살짝 지정(가독성)
   (ws as any)['!cols'] = [
-    { wch: 6 },  // 순번
-    { wch: 28 }, // 이전상품명
-    { wch: 18 }, // 카테고리
-    { wch: 40 }, // 원본이미지
-    { wch: 10 }, // 선택 인덱스
-    { wch: 18 }, // 판매자
-    { wch: 10 }, // 판매량
-    { wch: 12 }, // 가격(정가)
-    { wch: 14 }, // 가격(프로모션)
-    { wch: 42 }, // 상세링크
-    { wch: 10 }, // 배대지
-    { wch: 16 }, // 비고
+    { wch: 6 },
+    { wch: 28 },
+    { wch: 18 },
+    { wch: 40 },
+    { wch: 10 },
+    { wch: 18 },
+    { wch: 10 },
+    { wch: 12 },
+    { wch: 14 },
+    { wch: 42 },
+    { wch: 10 },
+    { wch: 16 },
   ];
 
   XLSX.utils.book_append_sheet(wb, ws, 'results');
 
-  // Node에서 ArrayBuffer로 쓰기
-  const ab = XLSX.write(wb, {
-    type: 'array',
-    bookType: 'xlsx',
-  }) as ArrayBuffer;
-
+  const ab = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
   const buf = Buffer.from(ab);
 
   return new NextResponse(buf, {
