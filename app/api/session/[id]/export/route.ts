@@ -5,11 +5,10 @@ import ExcelJS from 'exceljs';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyToken } from '@/lib/auth';
 
-export const runtime = 'nodejs'; // ✅ exceljs + fetch 이미지용 (Node 런타임)
+export const runtime = 'nodejs';
 
-// 엑셀 스타일 상수
 const COLS = [
-  { header: '상품이미지', key: 'img', width: 24 }, // 이미지 칼럼(폭)
+  { header: '상품이미지', key: 'img', width: 24 },
   { header: '이전상품명', key: 'prev_name', width: 40 },
   { header: '카테고리', key: 'category', width: 28 },
   { header: '상품명', key: 'title', width: 46 },
@@ -25,14 +24,14 @@ type Item = {
   sales: string | null;
   seller: string | null;
   detail_url: string;
-  title?: string; // 일부 응답에는 title이 있을 수 있음
+  title?: string;
 };
 
 type RowDB = {
   order_no: number;
   prev_name: string | null;
   category: string | null;
-  baedaji: number | null; // 원 단위
+  baedaji: number | null;
   selected_idx: number | null;
   candidates: Item[] | null;
   src_img_url: string | null;
@@ -43,25 +42,26 @@ function https(u?: string | null) {
   return u.startsWith('//') ? `https:${u}` : u;
 }
 
-// 워크시트에 이미지 사각형(셀 내부) 크기
-const IMG_W = 160; // px
-const IMG_H = 160; // px
-const ROW_HEIGHT = 130; // pt 대략 (px과 1:1은 아님, 보기 좋은 값)
+const IMG_W = 160;
+const IMG_H = 160;
+const ROW_HEIGHT = 130;
 
-export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
-  const sessionId = params.id;
+export async function GET(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> } // ✅ Next.js 15 타입 시그니처
+) {
+  const { id: sessionId } = await context.params; // ✅ Promise에서 꺼냄
 
   try {
-    // ── 인증 ────────────────────────────────────────────────────────────────
-    const jar = await cookies();
+    // 인증
+    const jar = cookies(); // ✅ 동기 API
     const token = jar.get('s_token')?.value;
     const payload = verifyToken(token);
-
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
     }
 
-    // ── 데이터 로딩 ─────────────────────────────────────────────────────────
+    // 데이터 로딩
     const { data, error } = await supabaseAdmin
       .from('rows')
       .select(
@@ -76,32 +76,28 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
     const rows = (data || []) as RowDB[];
 
-    // ── 엑셀 생성 ───────────────────────────────────────────────────────────
+    // 엑셀 생성
     const wb = new ExcelJS.Workbook();
     wb.creator = 'work-export';
     wb.created = new Date();
 
     const ws = wb.addWorksheet(`세션 ${sessionId}`, {
-      views: [{ state: 'frozen', ySplit: 1 }], // 헤더 고정
+      views: [{ state: 'frozen', ySplit: 1 }],
     });
 
-    // 컬럼/헤더 설정
     ws.columns = COLS.map(c => ({ header: c.header, key: c.key as string, width: c.width }));
 
-    // 헤더 스타일
     const headerRow = ws.getRow(1);
     headerRow.font = { bold: true };
     headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
     headerRow.height = 20;
 
-    // ── 한 줄씩 작성 ─────────────────────────────────────────────────────────
     const origin = new URL(req.url).origin;
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
-      const rowIdx = i + 2; // 실제 엑셀 row 번호(헤더 다음)
+      const rowIdx = i + 2;
 
-      // 선택된 후보
       const cand =
         (r.selected_idx != null &&
           Array.isArray(r.candidates) &&
@@ -112,7 +108,6 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
       const detailUrl = https(cand?.detail_url ?? '');
       const chosenImgUrl = https(cand?.img_url ?? '') || https(r.src_img_url);
 
-      // 값 채우기(이미지 제외)
       ws.getCell(rowIdx, 2).value = r.prev_name ?? '';
       ws.getCell(rowIdx, 3).value = r.category ?? '';
       ws.getCell(rowIdx, 4).value = title;
@@ -120,40 +115,33 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
       ws.getCell(rowIdx, 6).value = detailUrl;
       ws.getCell(rowIdx, 7).value = chosenImgUrl;
 
-      // 행 높이(이미지 칸이 보이도록)
       ws.getRow(rowIdx).height = ROW_HEIGHT;
 
-      // 이미지 삽입(있을 때만)
       if (chosenImgUrl) {
         try {
-          // referer 우회를 위해 내부 프록시 이용
           const proxied = `${origin}/api/img?u=${encodeURIComponent(chosenImgUrl)}`;
           const res = await fetch(proxied, { cache: 'no-store' });
           if (res.ok) {
             const ab = await res.arrayBuffer();
             const base64 = Buffer.from(ab).toString('base64');
-
-            const ext: 'png' | 'jpeg' =
-              /\.png($|\?)/i.test(chosenImgUrl) ? 'png' : 'jpeg';
+            const ext: 'png' | 'jpeg' = /\.png($|\?)/i.test(chosenImgUrl) ? 'png' : 'jpeg';
 
             const imageId = wb.addImage({
               base64,
               extension: ext,
             });
 
-            // A열(1번째) 셀 내부에 이미지 배치
             ws.addImage(imageId, {
-              tl: { col: 0, row: rowIdx - 1 }, // tl은 0-index 기반
+              tl: { col: 0, row: rowIdx - 1 },
               ext: { width: IMG_W, height: IMG_H },
               editAs: 'oneCell',
             });
           }
         } catch {
-          // 이미지 실패는 무시하고 텍스트만 남김
+          /* ignore image error */
         }
       }
 
-      // 약간의 테두리/정렬(선택)
       for (let c = 2; c <= 7; c++) {
         const cell = ws.getCell(rowIdx, c);
         cell.alignment = { vertical: 'middle', wrapText: true };
@@ -166,23 +154,17 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
       }
     }
 
-    // 버퍼로 쓰기 및 응답
     const buf = await wb.xlsx.writeBuffer();
-
     const filename = `${sessionId}.xlsx`;
     return new NextResponse(buf, {
       status: 200,
       headers: {
-        'content-type':
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'content-type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         'content-disposition': `attachment; filename="${encodeURIComponent(filename)}"`,
         'cache-control': 'no-store',
       },
     });
   } catch (err: any) {
-    return NextResponse.json(
-      { ok: false, error: String(err?.message || err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: String(err?.message || err) }, { status: 500 });
   }
 }
