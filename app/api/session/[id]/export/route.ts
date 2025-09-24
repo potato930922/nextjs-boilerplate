@@ -2,9 +2,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import ExcelJS from 'exceljs';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyToken } from '@/lib/auth';
 
-// 필요시 환경 맞게 수정
+export const runtime = 'nodejs'; // ✅ exceljs + fetch 이미지용 (Node 런타임)
+
+// 엑셀 스타일 상수
+const COLS = [
+  { header: '상품이미지', key: 'img', width: 24 }, // 이미지 칼럼(폭)
+  { header: '이전상품명', key: 'prev_name', width: 40 },
+  { header: '카테고리', key: 'category', width: 28 },
+  { header: '상품명', key: 'title', width: 46 },
+  { header: '배송비', key: 'baedaji', width: 12 },
+  { header: '상품URL', key: 'detail_url', width: 60 },
+  { header: '이미지URL', key: 'img_url', width: 60 },
+] as const;
+
 type Item = {
   img_url: string;
   promo_price: number | null;
@@ -12,188 +25,163 @@ type Item = {
   sales: string | null;
   seller: string | null;
   detail_url: string;
-  // title?: string; // 만약 서버에서 내려주면 사용
+  title?: string; // 일부 응답에는 title이 있을 수 있음
 };
 
-type Row = {
-  row_id: number;
+type RowDB = {
   order_no: number;
   prev_name: string | null;
   category: string | null;
-  src_img_url: string | null;
-  main_thumb_url: string | null;
+  baedaji: number | null; // 원 단위
   selected_idx: number | null;
-  baedaji: number | null;
-  skip: boolean | null;
-  delete: boolean | null;
-  status: string | null;
-  // new_name?: string | null; // 있으면 사용
-  candidates?: Item[];
+  candidates: Item[] | null;
+  src_img_url: string | null;
 };
 
-// 유틸
-const abs = (u?: string | null) => {
+function https(u?: string | null) {
   if (!u) return '';
   return u.startsWith('//') ? `https:${u}` : u;
-};
+}
 
-export async function GET(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> } // Next 15
-) {
-  const { id: sessionId } = await context.params;
+// 워크시트에 이미지 사각형(셀 내부) 크기
+const IMG_W = 160; // px
+const IMG_H = 160; // px
+const ROW_HEIGHT = 130; // pt 대략 (px과 1:1은 아님, 보기 좋은 값)
+
+export async function GET(req: NextRequest, { params }: { params: { id: string } }) {
+  const sessionId = params.id;
 
   try {
     // ── 인증 ────────────────────────────────────────────────────────────────
-    const jar = await cookies();  
-    const token = jar.get('s_token')?.value || '';
+    const jar = await cookies();
+    const token = jar.get('s_token')?.value;
     const payload = verifyToken(token);
+
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
     }
 
-    // ── rows API에서 프리패치된 후보 포함해서 받아오기(서버에서 그대로 사용) ──
-    const proto =
-      req.headers.get('x-forwarded-proto') ||
-      (process.env.NODE_ENV === 'production' ? 'https' : 'http');
-    const host = req.headers.get('host')!;
-    const baseUrl = `${proto}://${host}`;
+    // ── 데이터 로딩 ─────────────────────────────────────────────────────────
+    const { data, error } = await supabaseAdmin
+      .from('rows')
+      .select(
+        'order_no, prev_name, category, baedaji, selected_idx, candidates, src_img_url'
+      )
+      .eq('session_id', sessionId)
+      .order('order_no', { ascending: true });
 
-    const rowsRes = await fetch(`${baseUrl}/api/session/${sessionId}/rows`, {
-      // 쿠키 전달(선택)
-      headers: token ? { cookie: `s_token=${token}` } : undefined,
-      cache: 'no-store',
-    });
-    const rowsJson = await rowsRes.json();
-    if (!rowsJson?.ok) {
-      return NextResponse.json(
-        { ok: false, error: rowsJson?.error || 'rows_failed' },
-        { status: 500 }
-      );
+    if (error) {
+      return NextResponse.json({ ok: false, error: String(error.message || error) }, { status: 500 });
     }
-    const rows: Row[] = rowsJson.rows || [];
 
-    // ── Excel 워크북 구성 ────────────────────────────────────────────────
+    const rows = (data || []) as RowDB[];
+
+    // ── 엑셀 생성 ───────────────────────────────────────────────────────────
     const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet('Export');
+    wb.creator = 'work-export';
+    wb.created = new Date();
 
-    // 컬럼 폭/행 높이 살짝 보기 좋게
-    ws.columns = [
-      { header: '상품이미지', key: 'imgCol', width: 18 },
-      { header: '이전상품명', key: 'prev', width: 35 },
-      { header: '카테고리', key: 'cat', width: 20 },
-      { header: '상품명', key: 'name', width: 35 },
-      { header: '배송비', key: 'ship', width: 12 },
-      { header: '상품URL', key: 'detail', width: 45 },
-      { header: '이미지URL', key: 'imgurl', width: 50 },
-    ];
+    const ws = wb.addWorksheet(`세션 ${sessionId}`, {
+      views: [{ state: 'frozen', ySplit: 1 }], // 헤더 고정
+    });
+
+    // 컬럼/헤더 설정
+    ws.columns = COLS.map(c => ({ header: c.header, key: c.key as string, width: c.width }));
+
     // 헤더 스타일
-    ws.getRow(1).font = { bold: true };
+    const headerRow = ws.getRow(1);
+    headerRow.font = { bold: true };
+    headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
+    headerRow.height = 20;
 
-    // 이미지 넣기 위한 헬퍼: 우리 프록시를 통해 바이트 받아오기
-    const fetchImageBuffer = async (imgUrl: string) => {
-      try {
-        if (!imgUrl) return null;
-        const proxied = `${baseUrl}/api/img?u=${encodeURIComponent(imgUrl)}`;
-        const r = await fetch(proxied, { cache: 'no-store' });
-        if (!r.ok) return null;
-        const ab = await r.arrayBuffer();
-        return Buffer.from(ab);
-      } catch {
-        return null;
-      }
-    };
+    // ── 한 줄씩 작성 ─────────────────────────────────────────────────────────
+    const origin = new URL(req.url).origin;
 
-    // 데이터 행 작성
-    for (const row of rows.sort((a, b) => a.order_no - b.order_no)) {
-      const selected =
-        row.selected_idx != null && row.candidates
-          ? row.candidates[row.selected_idx]
-          : undefined;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      const rowIdx = i + 2; // 실제 엑셀 row 번호(헤더 다음)
 
-      const productName =
-        // @ts-ignore - new_name이 존재하면 사용
-        (row as any).new_name ?? row.prev_name ?? '';
+      // 선택된 후보
+      const cand =
+        (r.selected_idx != null &&
+          Array.isArray(r.candidates) &&
+          r.candidates[r.selected_idx | 0]) ||
+        null;
 
-      const detailUrl = selected?.detail_url ? abs(selected.detail_url) : '';
-      const imgUrl =
-        selected?.img_url
-          ? abs(selected.img_url)
-          : row.main_thumb_url
-          ? abs(row.main_thumb_url)
-          : '';
+      const title = (cand?.title ?? '').trim();
+      const detailUrl = https(cand?.detail_url ?? '');
+      const chosenImgUrl = https(cand?.img_url ?? '') || https(r.src_img_url);
 
-      // 새로운 데이터 행 추가 (이미지는 나중에 삽입)
-      const excelRow = ws.addRow({
-        imgCol: '', // 이미지 자리
-        prev: row.prev_name ?? '',
-        cat: row.category ?? '',
-        name: productName ?? '',
-        ship: row.baedaji ?? null, // 숫자
-        detail: detailUrl,
-        imgurl: imgUrl,
-      });
+      // 값 채우기(이미지 제외)
+      ws.getCell(rowIdx, 2).value = r.prev_name ?? '';
+      ws.getCell(rowIdx, 3).value = r.category ?? '';
+      ws.getCell(rowIdx, 4).value = title;
+      ws.getCell(rowIdx, 5).value = r.baedaji != null ? r.baedaji : '';
+      ws.getCell(rowIdx, 6).value = detailUrl;
+      ws.getCell(rowIdx, 7).value = chosenImgUrl;
 
-      // 상품URL/이미지URL 하이퍼링크 처리
-      if (detailUrl) {
-        const c = ws.getCell(`F${excelRow.number}`);
-        c.value = { text: detailUrl, hyperlink: detailUrl };
-        c.font = { color: { argb: 'FF1B73E8' }, underline: true };
-      }
-      if (imgUrl) {
-        const c = ws.getCell(`G${excelRow.number}`);
-        c.value = { text: imgUrl, hyperlink: imgUrl };
-        c.font = { color: { argb: 'FF1B73E8' }, underline: true };
-      }
+      // 행 높이(이미지 칸이 보이도록)
+      ws.getRow(rowIdx).height = ROW_HEIGHT;
 
-      // 행 높이(썸네일 보기 좋게)
-      ws.getRow(excelRow.number).height = 100;
+      // 이미지 삽입(있을 때만)
+      if (chosenImgUrl) {
+        try {
+          // referer 우회를 위해 내부 프록시 이용
+          const proxied = `${origin}/api/img?u=${encodeURIComponent(chosenImgUrl)}`;
+          const res = await fetch(proxied, { cache: 'no-store' });
+          if (res.ok) {
+            const ab = await res.arrayBuffer();
+            const base64 = Buffer.from(ab).toString('base64');
 
-      // 썸네일 삽입(가능한 경우)
-      if (imgUrl) {
-        const buf = await fetchImageBuffer(imgUrl);
-        if (buf) {
-          // 확장자 추정(대부분 jpeg)
-          const lower = imgUrl.toLowerCase();
-          const ext =
-            lower.endsWith('.png') || lower.includes('image/png')
-              ? 'png'
-              : 'jpeg';
-          const imageId = wb.addImage({ buffer: buf, extension: ext as any });
+            const ext: 'png' | 'jpeg' =
+              /\.png($|\?)/i.test(chosenImgUrl) ? 'png' : 'jpeg';
 
-          // A열(1번째) 셀 내부에 맞춰 배치
-          // 셀 좌표: col,row 기반(0-index 아님)
-          ws.addImage(imageId, {
-            tl: { col: 0, row: excelRow.number - 1 }, // A열 = 0
-            br: { col: 1, row: excelRow.number }, // 한 셀 영역
-            editAs: 'oneCell',
-          });
+            const imageId = wb.addImage({
+              base64,
+              extension: ext,
+            });
+
+            // A열(1번째) 셀 내부에 이미지 배치
+            ws.addImage(imageId, {
+              tl: { col: 0, row: rowIdx - 1 }, // tl은 0-index 기반
+              ext: { width: IMG_W, height: IMG_H },
+              editAs: 'oneCell',
+            });
+          }
+        } catch {
+          // 이미지 실패는 무시하고 텍스트만 남김
         }
       }
+
+      // 약간의 테두리/정렬(선택)
+      for (let c = 2; c <= 7; c++) {
+        const cell = ws.getCell(rowIdx, c);
+        cell.alignment = { vertical: 'middle', wrapText: true };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFDDDDDD' } },
+          left: { style: 'thin', color: { argb: 'FFDDDDDD' } },
+          bottom: { style: 'thin', color: { argb: 'FFDDDDDD' } },
+          right: { style: 'thin', color: { argb: 'FFDDDDDD' } },
+        };
+      }
     }
 
-    // 숫자 서식(배송비)
-    ws.getColumn('ship').numFmt = '#,##0';
-
-    // 워크북 → 버퍼
+    // 버퍼로 쓰기 및 응답
     const buf = await wb.xlsx.writeBuffer();
 
-    // 파일 응답
-    const filename = `export_${sessionId}.xlsx`;
-    return new NextResponse(buf as any, {
+    const filename = `${sessionId}.xlsx`;
+    return new NextResponse(buf, {
       status: 200,
       headers: {
         'content-type':
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'content-disposition': `attachment; filename="${encodeURIComponent(
-          filename
-        )}"`,
+        'content-disposition': `attachment; filename="${encodeURIComponent(filename)}"`,
         'cache-control': 'no-store',
       },
     });
-  } catch (e: any) {
+  } catch (err: any) {
     return NextResponse.json(
-      { ok: false, error: e?.message || 'export_failed' },
+      { ok: false, error: String(err?.message || err) },
       { status: 500 }
     );
   }
