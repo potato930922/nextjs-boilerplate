@@ -46,7 +46,7 @@ export async function GET(
   try {
     // ── 인증 ────────────────────────────────────────────────────────────────
     const jar = await cookies();  
-    const token = cookies().get('s_token')?.value;
+    const token = jar.get('s_token')?.value || '';
     const payload = verifyToken(token);
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
