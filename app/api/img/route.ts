@@ -1,94 +1,87 @@
+// app/api/img/route.ts
 import { NextRequest, NextResponse } from 'next/server';
+import crypto from 'crypto';
+import sharp from 'sharp';
+import { supabaseAdmin } from '@/lib/supabaseAdmin';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export const dynamic = 'force-dynamic'; // node runtime 보장
 
-function safeDecode(u: string) {
-  try { return decodeURIComponent(u); } catch { return u; }
-}
-function toHttps(u: string) {
+const BUCKET = process.env.SUPABASE_STORAGE_BUCKET_THUMBS || 'thumbs';
+
+function https(u: string) {
   if (!u) return '';
-  const s = u.trim();
-  if (s.startsWith('//')) return 'https:' + s;
-  if (/^https?:\/\//i.test(s)) return s.replace(/^http:\/\//i, 'https://');
-  return 'https://' + s;
+  return u.startsWith('//') ? 'https:' + u : u;
 }
-function pickReferer(hostname: string) {
-  if (hostname.includes('tmall.com')) return 'https://detail.tmall.com/';
-  if (hostname.includes('taobao.com')) return 'https://item.taobao.com/';
-  if (hostname.includes('alicdn.com')) return 'https://item.taobao.com/';
-  return 'https://item.taobao.com/';
+function sha256(buf: Buffer) {
+  return crypto.createHash('sha256').update(buf).digest('hex');
 }
-function isGSearch(host: string) {
-  return /^g\.search\d?\.alicdn\.com$/i.test(host);
-}
-function tryMirror(u: URL, which: 'img'|'gw'): URL {
-  const mirror = which === 'img' ? 'img.alicdn.com' : 'gw.alicdn.com';
-  const out = new URL(u.toString());
-  out.hostname = mirror;
-  out.pathname = out.pathname
-    .replace(/^\/img\/bao\//i, '/bao/')
-    .replace(/^\/imgextra\/?/i, '/imgextra/');
-  return out;
-}
-async function fetchImage(url: URL) {
-  return fetch(url, {
-    redirect: 'follow',
-    headers: {
-      Referer: pickReferer(url.hostname),
-      Accept: 'image/avif,image/webp,image/*,*/*;q=0.8',
-      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,ko;q=0.7',
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
-    },
-    cache: 'no-store',
-  });
+
+async function fetchAndStoreThumb(srcUrl: string) {
+  // 1) 원본 가져오기
+  const res = await fetch(srcUrl, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`fetch_${res.status}`);
+  const ab = await res.arrayBuffer();
+  const input = Buffer.from(ab);
+
+  // 2) 320px webp 썸네일
+  const webp = await sharp(input)
+    .resize({ width: 320, withoutEnlargement: true })
+    .webp({ quality: 78 })
+    .toBuffer();
+
+  // 3) 중복 방지 키
+  const hash = sha256(webp);
+  const key = `thumbs/${hash}.webp`;
+
+  // 4) 이미 있으면 업로드 생략
+  const listed = await supabaseAdmin.storage.from(BUCKET).list('thumbs', { search: `${hash}.webp` });
+  const exists = listed.data?.some(f => f.name === `${hash}.webp`);
+  if (!exists) {
+    const up = await supabaseAdmin.storage.from(BUCKET).upload(key, webp, {
+      contentType: 'image/webp',
+      upsert: true,
+    });
+    if (up.error) throw new Error(up.error.message);
+  }
+
+  // 5) 공개 URL
+  const pub = supabaseAdmin.storage.from(BUCKET).getPublicUrl(key);
+  const url = pub.data?.publicUrl;
+  if (!url) throw new Error('no_public_url');
+
+  return url;
 }
 
 export async function GET(req: NextRequest) {
-  const raw = req.nextUrl.searchParams.get('u') || '';
-  if (!raw) return new NextResponse('missing u', { status: 400 });
+  const u = req.nextUrl.searchParams.get('u') || '';
+  const store = req.nextUrl.searchParams.get('store') === '1';
+  if (!u) {
+    return NextResponse.json({ ok: false, error: 'no_url' }, { status: 400 });
+  }
+  const url = https(u);
 
-  const normalized = toHttps(safeDecode(raw));
-  let url: URL;
-  try {
-    url = new URL(normalized);
-  } catch {
-    return new NextResponse('bad url', { status: 400 });
+  if (store) {
+    try {
+      const out = await fetchAndStoreThumb(url);
+      return NextResponse.json({ ok: true, url: out });
+    } catch (e: any) {
+      return NextResponse.json({ ok: false, error: e?.message || 'store_failed' }, { status: 502 });
+    }
   }
 
+  // 단순 프록시 (거의 사용하지 않지만 보존)
   try {
-    // 1) 원본
-    let r = await fetchImage(url);
-
-    // 2) g.search*면 미러 폴백
-    if (!r.ok && isGSearch(url.hostname)) {
-      const r1 = await fetchImage(tryMirror(url, 'img'));
-      if (r1.ok) r = r1;
-      else {
-        const r2 = await fetchImage(tryMirror(url, 'gw'));
-        if (r2.ok) r = r2;
-        else r = r1;
-      }
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      return NextResponse.json({ ok: false, error: `upstream_${r.status}`, detail: t.slice(0, 200) }, { status: 502 });
     }
-
-    if (r.ok) {
-      const ct = r.headers.get('content-type') || 'image/jpeg';
-      return new NextResponse(r.body, {
-        status: 200,
-        headers: { 'content-type': ct, 'cache-control': 'public, max-age=600' },
-      });
-    }
-
-    // 3) 마지막 폴백: weserv 프록시로 리다이렉트 (클라이언트가 직접 받음)
-    const hostPathQuery = url.hostname + url.pathname + (url.search || '');
-    const weserv = 'https://images.weserv.nl/?url=' + encodeURIComponent(hostPathQuery);
-    return NextResponse.redirect(weserv, 302);
-
+    const ab = await r.arrayBuffer();
+    return new NextResponse(ab, {
+      status: 200,
+      headers: { 'content-type': r.headers.get('content-type') || 'image/jpeg' },
+    });
   } catch (e: any) {
-    // fetch 자체가 실패해도 weserv로 리다이렉트
-    const hostPathQuery = url.hostname + url.pathname + (url.search || '');
-    const weserv = 'https://images.weserv.nl/?url=' + encodeURIComponent(hostPathQuery);
-    return NextResponse.redirect(weserv, 302);
+    return NextResponse.json({ ok: false, error: 'proxy_error' }, { status: 502 });
   }
 }
