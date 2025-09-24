@@ -1,7 +1,6 @@
 // app/api/session/[id]/prefetch/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import pLimit from 'p-limit';
 import sharp from 'sharp';
 import crypto from 'crypto';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
@@ -12,6 +11,7 @@ export const dynamic = 'force-dynamic';
 const HOST = 'taobao-advanced.p.rapidapi.com';
 const URL_LOW = `https://${HOST}/item_image_search`;
 const BUCKET = process.env.SUPABASE_STORAGE_BUCKET_THUMBS || 'thumbs';
+const CONCURRENCY = 4; // 동시 작업 수
 
 type Item = {
   img_url: string;
@@ -70,7 +70,7 @@ async function taobaoSearch(img: string) {
   return normalizeTaobao(j);
 }
 
-// --- 썸네일 저장 (prefetch 내부에서 직접 사용) ---
+// ── 썸네일 저장 유틸 ───────────────────────────────────────────
 function sha256(buf: Buffer) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
@@ -88,7 +88,7 @@ async function storeThumb(srcUrl: string): Promise<string> {
   const hash = sha256(webp);
   const key = `thumbs/${hash}.webp`;
 
-  // 존재 확인/업서트
+  // 존재 확인 후 업서트
   const listed = await supabaseAdmin.storage.from(BUCKET).list('thumbs', { search: `${hash}.webp` });
   const exists = listed.data?.some(f => f.name === `${hash}.webp`);
   if (!exists) {
@@ -104,18 +104,41 @@ async function storeThumb(srcUrl: string): Promise<string> {
   return url;
 }
 
+// ── 간단 동시성 제어(의존성 無) ────────────────────────────────
+async function mapPool<T, R>(
+  arr: T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(arr.length);
+  let next = 0;
+
+  async function run() {
+    while (true) {
+      const i = next++;
+      if (i >= arr.length) return;
+      results[i] = await worker(arr[i], i);
+    }
+  }
+
+  const runners = Array.from({ length: Math.min(limit, arr.length) }, run);
+  await Promise.all(runners);
+  return results;
+}
+
+// ── 핸들러 ─────────────────────────────────────────────────────
 export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
   const sessionId = params.id;
 
   try {
-    // ── 인증 ─────────────────────────────────
+    // 인증
     const token = cookies().get('s_token')?.value;
     const payload = verifyToken(token);
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
     }
 
-    // rows 읽기
+    // rows 조회
     const qr = await supabaseAdmin
       .from('rows')
       .select('row_id, src_img_url')
@@ -130,55 +153,51 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       return NextResponse.json({ ok: false, error: 'no_rows' }, { status: 400 });
     }
 
-    let processed = 0;
     const startedAt = Date.now();
-    const limit = pLimit(4); // RapidAPI/Storage 부담 완화
+    let processed = 0;
 
-    await Promise.all(
-      rows.map((row: any) =>
-        limit(async () => {
-          const src = row.src_img_url || '';
-          if (!src) return;
+    await mapPool(rows, CONCURRENCY, async (row: any) => {
+      const src = row.src_img_url || '';
+      if (!src) return null;
 
-          // 1) 기존 후보 제거
-          await supabaseAdmin.from('candidates').delete().eq('row_id', row.row_id);
+      // 1) 기존 후보 삭제
+      await supabaseAdmin.from('candidates').delete().eq('row_id', row.row_id);
 
-          // 2) 검색
-          const items = await taobaoSearch(src);
+      // 2) 이미지 검색
+      const items = await taobaoSearch(src);
 
-          // 3) 이미지 저장(없으면 원본 유지)
-          const saved = await Promise.all(
-            items.map(async (it) => {
-              if (!it.img_url) return it;
-              try {
-                const fixed = await storeThumb(it.img_url);
-                return { ...it, img_url: fixed };
-              } catch {
-                return it;
-              }
-            })
-          );
-
-          // 4) 후보 insert
-          const inserts = saved.map((it, idx) => ({
-            row_id: row.row_id,
-            idx,
-            img_url: it.img_url,
-            detail_url: it.detail_url,
-            price: it.price,
-            promo_price: it.promo_price,
-            sales: it.sales,
-            seller: it.seller,
-          }));
-          await supabaseAdmin.from('candidates').insert(inserts);
-
-          // 5) 진행상태 갱신
-          await supabaseAdmin.from('rows').update({ status: 'ready' }).eq('row_id', row.row_id);
-
-          processed += 1;
+      // 3) 썸네일 저장(실패 시 원본 유지)
+      const saved = await Promise.all(
+        items.map(async (it) => {
+          if (!it.img_url) return it;
+          try {
+            const fixed = await storeThumb(it.img_url);
+            return { ...it, img_url: fixed };
+          } catch {
+            return it;
+          }
         })
-      )
-    );
+      );
+
+      // 4) 후보 insert
+      const inserts = saved.map((it, idx) => ({
+        row_id: row.row_id,
+        idx,
+        img_url: it.img_url,
+        detail_url: it.detail_url,
+        price: it.price,
+        promo_price: it.promo_price,
+        sales: it.sales,
+        seller: it.seller,
+      }));
+      await supabaseAdmin.from('candidates').insert(inserts);
+
+      // 5) 진행상태 갱신
+      await supabaseAdmin.from('rows').update({ status: 'ready' }).eq('row_id', row.row_id);
+      processed += 1;
+
+      return null;
+    });
 
     const dur = Date.now() - startedAt;
     return NextResponse.json({ ok: true, processed, dur_ms: dur });
