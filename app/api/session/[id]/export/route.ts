@@ -1,6 +1,5 @@
 // app/api/session/[id]/export/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
 import ExcelJS from 'exceljs';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyToken } from '@/lib/auth';
@@ -48,14 +47,13 @@ const ROW_HEIGHT = 130;
 
 export async function GET(
   req: NextRequest,
-  context: { params: Promise<{ id: string }> } // ✅ Next.js 15 타입 시그니처
+  context: { params: Promise<{ id: string }> } // Next.js 15 시그니처
 ) {
-  const { id: sessionId } = await context.params; // ✅ Promise에서 꺼냄
+  const { id: sessionId } = await context.params;
 
   try {
-    // 인증
-    const jar = cookies(); // ✅ 동기 API
-    const token = jar.get('s_token')?.value;
+    // ── 인증 ─────────────────────────────────────────────
+    const token = req.cookies.get('s_token')?.value; // ✅ 여기만 변경
     const payload = verifyToken(token);
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
@@ -71,7 +69,10 @@ export async function GET(
       .order('order_no', { ascending: true });
 
     if (error) {
-      return NextResponse.json({ ok: false, error: String(error.message || error) }, { status: 500 });
+      return NextResponse.json(
+        { ok: false, error: String(error.message || error) },
+        { status: 500 }
+      );
     }
 
     const rows = (data || []) as RowDB[];
@@ -138,7 +139,7 @@ export async function GET(
             });
           }
         } catch {
-          /* ignore image error */
+          /* ignore */
         }
       }
 
