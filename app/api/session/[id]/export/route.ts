@@ -16,23 +16,25 @@ const COLS = [
   { header: '이미지URL', key: 'img_url', width: 60 },
 ] as const;
 
-type Item = {
-  img_url: string;
-  promo_price: number | null;
-  price: number | null;
-  sales: string | null;
-  seller: string | null;
-  detail_url: string;
-  title?: string;
+type Cand = {
+  row_id: number;
+  idx: number;
+  img_url: string | null;
+  detail_url: string | null;
+  title?: string | null;
+  price?: number | null;
+  promo_price?: number | null;
+  sales?: string | null;
+  seller?: string | null;
 };
 
 type RowDB = {
+  row_id: number;
   order_no: number;
   prev_name: string | null;
   category: string | null;
   baedaji: number | null;
   selected_idx: number | null;
-  candidates: Item[] | null;
   src_img_url: string | null;
 };
 
@@ -47,35 +49,50 @@ const ROW_HEIGHT = 130;
 
 export async function GET(
   req: NextRequest,
-  context: { params: Promise<{ id: string }> } // Next.js 15 시그니처
+  context: { params: Promise<{ id: string }> }
 ) {
   const { id: sessionId } = await context.params;
 
   try {
     // ── 인증 ─────────────────────────────────────────────
-    const token = req.cookies.get('s_token')?.value; // ✅ 여기만 변경
+    const token = req.cookies.get('s_token')?.value;
     const payload = verifyToken(token);
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
     }
 
-    // 데이터 로딩
-    const { data, error } = await supabaseAdmin
+    // 1) rows 읽기
+    const { data: rowsData, error: rowsErr } = await supabaseAdmin
       .from('rows')
-      .select(
-        'order_no, prev_name, category, baedaji, selected_idx, candidates, src_img_url'
-      )
+      .select('row_id, order_no, prev_name, category, baedaji, selected_idx, src_img_url')
       .eq('session_id', sessionId)
       .order('order_no', { ascending: true });
 
-    if (error) {
-      return NextResponse.json(
-        { ok: false, error: String(error.message || error) },
-        { status: 500 }
-      );
+    if (rowsErr) {
+      return NextResponse.json({ ok: false, error: String(rowsErr.message || rowsErr) }, { status: 500 });
     }
 
-    const rows = (data || []) as RowDB[];
+    const rows = (rowsData || []) as RowDB[];
+    const rowIds = rows.map(r => r.row_id);
+    // 빈 경우도 엑셀은 내려주자
+    // 2) candidates 한번에 읽기
+    let candMap = new Map<number, Cand[]>();
+    if (rowIds.length) {
+      const { data: cands, error: candErr } = await supabaseAdmin
+        .from('candidates')
+        .select('row_id, idx, img_url, detail_url, title, price, promo_price, sales, seller')
+        .in('row_id', rowIds);
+
+      if (candErr) {
+        return NextResponse.json({ ok: false, error: String(candErr.message || candErr) }, { status: 500 });
+      }
+
+      for (const c of (cands || []) as Cand[]) {
+        const arr = candMap.get(c.row_id) || [];
+        arr.push(c);
+        candMap.set(c.row_id, arr);
+      }
+    }
 
     // 엑셀 생성
     const wb = new ExcelJS.Workbook();
@@ -93,17 +110,17 @@ export async function GET(
     headerRow.alignment = { vertical: 'middle', horizontal: 'center' };
     headerRow.height = 20;
 
+    // 절대 URL (이미지 프록시 호출용)
     const origin = new URL(req.url).origin;
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       const rowIdx = i + 2;
 
-      const cand =
-        (r.selected_idx != null &&
-          Array.isArray(r.candidates) &&
-          r.candidates[r.selected_idx | 0]) ||
-        null;
+      const allCands = candMap.get(r.row_id) || [];
+      const cand = (r.selected_idx != null)
+        ? allCands.find(c => (c.idx | 0) === (r.selected_idx as number))
+        : undefined;
 
       const title = (cand?.title ?? '').trim();
       const detailUrl = https(cand?.detail_url ?? '');
@@ -120,6 +137,7 @@ export async function GET(
 
       if (chosenImgUrl) {
         try {
+          // 프록시 통해 이미지 받아 Excel 삽입
           const proxied = `${origin}/api/img?u=${encodeURIComponent(chosenImgUrl)}`;
           const res = await fetch(proxied, { cache: 'no-store' });
           if (res.ok) {
@@ -139,7 +157,7 @@ export async function GET(
             });
           }
         } catch {
-          /* ignore */
+          /* ignore image errors */
         }
       }
 
