@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyToken } from '@/lib/auth';
+import { ParamCtx, getParam } from '@/lib/route15';
 
 type SaveBody = {
   selected_idx: number | null;
@@ -13,16 +14,17 @@ type SaveBody = {
 
 export async function POST(
   req: NextRequest,
-  { params }: { params: { rowId: string } } // ✅ Next.js 15 표준 시그니처
+  context: ParamCtx<'rowId'> // ✅ 프로젝트 규격: params가 Promise 형태
 ) {
   try {
-    const rowId = Number(params.rowId);
+    const rowIdStr = await getParam(context, 'rowId');
+    const rowId = Number(rowIdStr);
     if (!Number.isFinite(rowId)) {
       return NextResponse.json({ ok: false, error: 'bad_row_id' }, { status: 400 });
     }
 
     // ── 인증 ─────────────────────────────────────────────
-    const token = cookies().get('s_token')?.value;
+    const token = cookies().get('s_token')?.value; // cookies()는 동기 API
     const payload = verifyToken(token);
     if (!payload) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
@@ -73,7 +75,6 @@ export async function POST(
       skip: willSkip,
       delete: willDelete,
       edited_by: 'web',
-      // 필요 시 업데이트 타임스탬프 컬럼이 있으면 여기서 갱신
     };
 
     const { error: upErr } = await supabaseAdmin
