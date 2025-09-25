@@ -1,102 +1,62 @@
+// app/api/session/[id]/rows/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyToken } from '@/lib/auth';
+import { ParamCtx, getParam, getToken } from '@/lib/route15';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export async function GET(req: NextRequest, context: ParamCtx<'id'>) {
+  const sessionId = await getParam(context, 'id');
 
-type Candidate = {
-  row_id: number;
-  idx: number | null;
-  img_url: string | null;
-  detail_url: string | null;
-  price: number | null;
-  promo_price: number | null;
-  sales: string | null;
-  seller: string | null;
-};
+  try {
+    const token = await getToken('s_token'); // ✅
+    const payload = verifyToken(token);
+    if (!payload || payload.session_id !== sessionId) {
+      return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
+    }
 
-function https(u?: string | null) {
-  if (!u) return '';
-  return u.startsWith('//') ? `https:${u}` : u;
-}
+    const { data: rows, error } = await supabaseAdmin
+      .from('rows')
+      .select('*')
+      .eq('session_id', sessionId)
+      .order('order_no');
+    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
 
-export async function GET(
-  req: NextRequest,
-  ctx: { params: Promise<{ id: string }> } // Next.js 15: Promise 시그니처
-) {
-  const { id: sessionId } = await ctx.params;
-
-  // 인증 확인 (PIN 미검증이면 401)
-  const token = req.cookies.get('s_token')?.value;
-  const payload = verifyToken(token);
-  if (!payload || payload.session_id !== sessionId) {
-    return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
-  }
-
-  // rows 기본 정보 조회
-  const { data: rows, error } = await supabaseAdmin
-    .from('rows')
-    .select(
-      `
-      row_id, order_no, prev_name, category, src_img_url, main_thumb_url,
-      selected_idx, baedaji, skip, delete, status
-    `
-    )
-    .eq('session_id', sessionId)
-    .order('order_no', { ascending: true });
-
-  if (error) {
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
-  }
-
-  if (!rows?.length) {
-    return NextResponse.json({ ok: true, rows: [] }, { status: 200, headers: { 'cache-control': 'no-store' } });
-  }
-
-  // 해당 rows의 candidates를 한 번에 가져와서 그룹핑
-  const rowIds = rows.map((r: any) => r.row_id);
-  const { data: cands, error: candErr } = await supabaseAdmin
-    .from('candidates')
-    .select('row_id, idx, img_url, detail_url, price, promo_price, sales, seller')
-    .in('row_id', rowIds)
-    .order('idx', { ascending: true });
-
-  if (candErr) {
-    return NextResponse.json({ ok: false, error: candErr.message }, { status: 500 });
-  }
-
-  const map = new Map<number, Candidate[]>();
-  for (const c of (cands ?? []) as Candidate[]) {
-    const arr = map.get(c.row_id) ?? [];
-    arr.push({
-      ...c,
-      img_url: https(c.img_url),
-      detail_url: https(c.detail_url),
-    });
-    map.set(c.row_id, arr);
-  }
-
-  // 각 row에 candidates 8개로 맞춰서 세팅 (부족하면 빈 슬롯)
-  const normalized = rows.map((r: any) => {
-    const arr = (map.get(r.row_id) ?? []).slice(0, 8);
-    while (arr.length < 8) {
-      arr.push({
-        row_id: r.row_id,
-        idx: arr.length,
-        img_url: '',
-        detail_url: '',
-        price: null,
-        promo_price: null,
-        sales: null,
-        seller: null,
+    // 각 row의 후보 8개 조인
+    const ids = (rows ?? []).map(r => r.row_id);
+    let candMap = new Map<number, any[]>();
+    if (ids.length) {
+      const { data: cands } = await supabaseAdmin
+        .from('candidates')
+        .select('row_id, idx, img_url, promo_price, price, sales, seller, detail_url')
+        .in('row_id', ids)
+        .order('idx', { ascending: true });
+      (cands ?? []).forEach(c => {
+        if (!candMap.has(c.row_id)) candMap.set(c.row_id, []);
+        candMap.get(c.row_id)!.push({
+          img_url: c.img_url || '',
+          promo_price: c.promo_price ?? null,
+          price: c.price ?? null,
+          sales: c.sales ?? null,
+          seller: c.seller ?? null,
+          detail_url: c.detail_url || '',
+        });
       });
     }
-    return { ...r, candidates: arr };
-  });
 
-  return NextResponse.json(
-    { ok: true, rows: normalized },
-    { status: 200, headers: { 'cache-control': 'no-store' } }
-  );
+    const out = (rows ?? []).map(r => ({
+      ...r,
+      candidates: candMap.get(r.row_id) ?? new Array(8).fill({
+        img_url: '',
+        promo_price: null,
+        price: null,
+        sales: null,
+        seller: null,
+        detail_url: '',
+      }),
+    }));
+
+    return NextResponse.json({ ok: true, rows: out });
+  } catch (e: any) {
+    return NextResponse.json({ ok: false, error: e?.message ?? 'rows_failed' }, { status: 500 });
+  }
 }
