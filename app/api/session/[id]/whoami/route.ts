@@ -1,29 +1,19 @@
+// app/api/session/[id]/whoami/route.ts
 import { NextRequest, NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
 import { verifyToken } from '@/lib/auth';
-
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
 
 export async function GET(
   req: NextRequest,
-  ctx: { params: Promise<{ id: string }> } // ✅ Next.js 15: Promise
+  context: { params: Promise<{ id: string }> } // ✅ Next 15: Promise 형태
 ) {
-  const { id: sessionId } = await ctx.params; // ✅ await 필요
+  const { id: sessionId } = await context.params; // ✅ await 필요
 
-  const token = req.cookies.get('s_token')?.value;
+  const token = cookies().get('s_token')?.value; // ✅ cookies()는 동기
   const payload = verifyToken(token);
 
   if (!payload || payload.session_id !== sessionId) {
-    // 인증 실패
-    return NextResponse.json(
-      { ok: false, session_id: null },
-      { status: 401, headers: { 'cache-control': 'no-store' } }
-    );
+    return NextResponse.json({ ok: true, session_id: null });
   }
-
-  // 인증 성공
-  return NextResponse.json(
-    { ok: true, session_id: sessionId },
-    { status: 200, headers: { 'cache-control': 'no-store' } }
-  );
+  return NextResponse.json({ ok: true, session_id: payload.session_id });
 }
