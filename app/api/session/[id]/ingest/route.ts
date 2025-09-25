@@ -1,14 +1,9 @@
 // app/api/session/[id]/ingest/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
 import { verifyToken } from '@/lib/auth';
+import { ParamCtx, getParam, getToken } from '@/lib/route15';
 
-/**
- * Body 형태 2가지를 모두 허용
- *  A) { rows: Array<{ prev_name, category, new_name, src_img_url, baedaji? }> }
- *  B) { prev_names: string[], categories: string[], new_names: string[], img_urls: string[] }
- */
 type IngestRow = {
   prev_name?: string | null;
   category?: string | null;
@@ -17,16 +12,12 @@ type IngestRow = {
   baedaji?: number | null;
 };
 
-export async function POST(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> } // Next 15: Promise 형태
-) {
-  const { id: sessionId } = await context.params;
+export async function POST(req: NextRequest, context: ParamCtx<'id'>) {
+  const sessionId = await getParam(context, 'id');
 
   try {
-    // ✅ Next 15: cookies()는 Promise<ReadonlyRequestCookies>
-    const jar = await cookies();
-    const token = jar.get('s_token')?.value;
+    // 인증
+    const token = await getToken('s_token'); // ✅
     const payload = verifyToken(token);
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
@@ -60,15 +51,13 @@ export async function POST(
       return NextResponse.json({ ok: false, error: del.error.message }, { status: 500 });
     }
 
-    // rows insert
     const inserts = rows
-      .filter((r) => r.src_img_url && (r.prev_name || r.new_name))
+      .filter(r => r.src_img_url && (r.prev_name || r.new_name))
       .map((r, idx) => ({
         session_id: sessionId,
         order_no: idx + 1,
         prev_name: r.prev_name ?? null,
         category: r.category ?? null,
-        new_name: r.new_name ?? null, // 스키마에 없으면 제거
         src_img_url: r.src_img_url ?? null,
         main_thumb_url: null,
         selected_idx: null,
