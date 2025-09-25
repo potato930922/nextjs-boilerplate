@@ -19,13 +19,14 @@ type IngestRow = {
 
 export async function POST(
   req: NextRequest,
-  context: { params: Promise<{ id: string }> } // ✅ Next 15: Promise 형태
+  context: { params: Promise<{ id: string }> } // Next 15: Promise 형태
 ) {
-  const { id: sessionId } = await context.params; // ✅ await 필요
+  const { id: sessionId } = await context.params;
 
   try {
-    // 인증
-    const token = cookies().get('s_token')?.value; // ✅ 동기 API
+    // ✅ Next 15: cookies()는 Promise<ReadonlyRequestCookies>
+    const jar = await cookies();
+    const token = jar.get('s_token')?.value;
     const payload = verifyToken(token);
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
@@ -67,7 +68,7 @@ export async function POST(
         order_no: idx + 1,
         prev_name: r.prev_name ?? null,
         category: r.category ?? null,
-        new_name: r.new_name ?? null, // ← DB에 new_name 컬럼 없으면 제거하세요
+        new_name: r.new_name ?? null, // 스키마에 없으면 제거
         src_img_url: r.src_img_url ?? null,
         main_thumb_url: null,
         selected_idx: null,
