@@ -1,76 +1,78 @@
 // app/api/img/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 
-// 허용 도메인(와일드카드 끝매칭)
+export const runtime = 'nodejs'; // ✅ 엣지 대신 Node.js로
+
+// 허용 도메인(후행 일치)
 const ALLOW_SUFFIXES = [
-  '.alicdn.com',        // img.alicdn.com, g.search1.alicdn.com ...
+  '.alicdn.com',
   '.alicdn.com.cn',
-  '.pstatic.net',       // shop-phinf.pstatic.net 등
-  '.alicdn.net',        // 일부 리전
+  '.alicdn.net',
+  '.pstatic.net',        // shop-phinf.pstatic.net 등
+  '.pstatp.com',         // 혹시 사용중이면
 ];
+
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 
 function isAllowedHost(host: string) {
   const h = host.toLowerCase();
-  return ALLOW_SUFFIXES.some(suf => h === suf.slice(1) || h.endsWith(suf));
+  return ALLOW_SUFFIXES.some(s => h === s.slice(1) || h.endsWith(s));
+}
+
+function guessReferer(host: string) {
+  if (host.endsWith('.pstatic.net')) return 'https://shopping.naver.com/';
+  if (host.endsWith('.alicdn.com') || host.endsWith('.alicdn.com.cn') || host.endsWith('.alicdn.net')) {
+    return 'https://www.aliexpress.com/';
+  }
+  return undefined;
 }
 
 export async function GET(req: NextRequest) {
   try {
-    const u = req.nextUrl.searchParams.get('u');
-    if (!u) {
-      return NextResponse.json({ ok: false, error: 'missing_param_u' }, { status: 400 });
-    }
+    const raw = req.nextUrl.searchParams.get('u');
+    if (!raw) return NextResponse.json({ ok: false, error: 'missing_param_u' }, { status: 400 });
 
-    let target: URL;
+    let url: URL;
     try {
-      // 이미 인코딩된 값이 넘어오므로 그대로 URL 객체화 시도
-      target = new URL(decodeURIComponent(u));
+      // decodeURIComponent 로 들어오거나 이미 인코딩된 경우 모두 수용
+      try { url = new URL(decodeURIComponent(raw)); }
+      catch { url = new URL(raw); }
     } catch {
-      // decode 실패하면 원문으로 시도
-      try { target = new URL(u); } catch {
-        return NextResponse.json({ ok: false, error: 'invalid_url' }, { status: 400 });
-      }
+      return NextResponse.json({ ok: false, error: 'invalid_url' }, { status: 400 });
     }
 
-    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+    if (!['http:', 'https:'].includes(url.protocol))
       return NextResponse.json({ ok: false, error: 'invalid_protocol' }, { status: 400 });
-    }
 
-    if (!isAllowedHost(target.hostname)) {
-      return NextResponse.json({ ok: false, error: `host_not_allowed:${target.hostname}` }, { status: 400 });
-    }
+    if (!isAllowedHost(url.hostname))
+      return NextResponse.json({ ok: false, error: `host_not_allowed:${url.hostname}` }, { status: 400 });
 
-    const fetchRes = await fetch(target.toString(), {
-      // 일부 CDN이 UA 없으면 403 내립니다
+    const referer = guessReferer(url.hostname);
+    const res = await fetch(url.toString(), {
+      redirect: 'follow',
       headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        'User-Agent': UA,
         'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         'Accept-Language': 'ko,en;q=0.9',
-        // Referer가 필요한 경우만 동작 — 보통 alicdn은 필요 X, Naver도 불필요
-        // 'Referer': target.origin,
+        ...(referer ? { Referer: referer } : {}),
       },
-      // Next 15 Edge 기본은 GET 캐시 가능
-      cache: 'no-store', // 필요 시 'force-cache'로 바꿔도 됩니다(이미지 CDN 자체 캐시가 강함)
-      // redirect: 'follow',
     });
 
-    if (!fetchRes.ok) {
+    if (!res.ok) {
+      // 상류 상태코드 그대로 전달 + 이유 기입
+      const text = await res.text().catch(() => '');
       return NextResponse.json(
-        { ok: false, error: `upstream_${fetchRes.status}` },
-        { status: fetchRes.status },
+        { ok: false, error: `upstream_${res.status}`, detail: text.slice(0, 200) },
+        { status: res.status }
       );
     }
 
-    // 컨텐츠 타입 전달
-    const contentType = fetchRes.headers.get('content-type') ?? 'image/jpeg';
-    const arrayBuf = await fetchRes.arrayBuffer();
-
-    return new NextResponse(arrayBuf, {
-      status: 200,
+    const type = res.headers.get('content-type') ?? 'image/jpeg';
+    const buf = Buffer.from(await res.arrayBuffer());
+    return new NextResponse(buf, {
       headers: {
-        'Content-Type': contentType,
-        // 앱 레벨 캐시 (원한다면 더 길게)
+        'Content-Type': type,
         'Cache-Control': 'public, max-age=86400, s-maxage=86400, immutable',
       },
     });
