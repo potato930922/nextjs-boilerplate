@@ -1,53 +1,33 @@
 // app/api/session/[id]/progress/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
-import { verifyToken } from '@/lib/auth';
+import { ParamCtx, getParam } from '@/lib/route15';
 
-export async function GET(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> } // ✅ Next 15: Promise 형태
-) {
-  const { id: sessionId } = await context.params; // ✅ await 필요
+export async function GET(req: NextRequest, context: ParamCtx<'id'>) {
+  const sessionId = await getParam(context, 'id');
 
   try {
-    // 인증
-    const token = cookies().get('s_token')?.value;
-    const payload = verifyToken(token);
-    if (!payload || payload.session_id !== sessionId) {
-      return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
-    }
-
-    // 전체 row 수
-    const { count: totalCount } = await supabaseAdmin
-      .from('rows')
-      .select('*', { count: 'exact', head: true })
-      .eq('session_id', sessionId);
-
-    // 후보가 1개 이상 들어간 row 수
-    const { data: rows } = await supabaseAdmin
+    const { data: rows, error } = await supabaseAdmin
       .from('rows')
       .select('row_id')
       .eq('session_id', sessionId);
-
-    let done = 0;
-    if (rows?.length) {
-      const ids = rows.map((r) => r.row_id);
-      const { data: anyCand } = await supabaseAdmin
-        .from('candidates')
-        .select('row_id')
-        .in('row_id', ids);
-
-      if (anyCand?.length) {
-        const set = new Set(anyCand.map((c) => c.row_id));
-        done = [...set].length;
-      }
+    if (error) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
+    const total = rows?.length ?? 0;
 
-    const total = totalCount ?? 0;
-    const ratio = total ? Math.min(1, done / total) : 0;
+    // 처리된 개수 = candidates가 한 개라도 존재하는 row 수
+    const { data: doneRows, error: e2 } = await supabaseAdmin
+      .from('candidates')
+      .select('row_id', { count: 'exact', head: true })
+      .in('row_id', rows?.map(r => r.row_id) ?? []);
+    if (e2) {
+      return NextResponse.json({ ok: false, error: e2.message }, { status: 500 });
+    }
+    const processed = doneRows?.length ?? 0;
+    const ratio = total > 0 ? processed / total : 0;
 
-    return NextResponse.json({ ok: true, total, done, ratio });
+    return NextResponse.json({ ok: true, total, processed, ratio });
   } catch (e: any) {
     return NextResponse.json({ ok: false, error: e?.message ?? 'progress_failed' }, { status: 500 });
   }
