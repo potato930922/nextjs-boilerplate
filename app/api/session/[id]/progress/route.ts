@@ -1,44 +1,54 @@
 // app/api/session/[id]/progress/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { cookies } from 'next/headers';
-import { verifyToken } from '@/lib/auth';
 import { supabaseAdmin } from '@/lib/supabaseAdmin';
+import { verifyToken } from '@/lib/auth';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+export async function GET(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> } // ✅ Next 15: Promise 형태
+) {
+  const { id: sessionId } = await context.params; // ✅ await 필요
 
-export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
   try {
-    const { id: sessionId } = await ctx.params;
-
-    const store = await cookies();
-    const token = store.get('s_token')?.value;
+    // 인증
+    const token = cookies().get('s_token')?.value;
     const payload = verifyToken(token);
     if (!payload || payload.session_id !== sessionId) {
       return NextResponse.json({ ok: false, error: 'unauth' }, { status: 401 });
     }
 
     // 전체 row 수
-    const { count: total, error: e1 } = await supabaseAdmin
+    const { count: totalCount } = await supabaseAdmin
       .from('rows')
-      .select('row_id', { count: 'exact', head: true })
+      .select('*', { count: 'exact', head: true })
       .eq('session_id', sessionId);
-    if (e1) return NextResponse.json({ ok: false, error: e1.message }, { status: 500 });
 
-    // done 수
-    const { count: done, error: e2 } = await supabaseAdmin
+    // 후보가 1개 이상 들어간 row 수
+    const { data: rows } = await supabaseAdmin
       .from('rows')
-      .select('row_id', { count: 'exact', head: true })
-      .eq('session_id', sessionId)
-      .eq('status', 'done');
-    if (e2) return NextResponse.json({ ok: false, error: e2.message }, { status: 500 });
+      .select('row_id')
+      .eq('session_id', sessionId);
 
-    const t = total ?? 0;
-    const d = done ?? 0;
-    const ratio = t ? Math.min(1, d / t) : 1;
+    let done = 0;
+    if (rows?.length) {
+      const ids = rows.map((r) => r.row_id);
+      const { data: anyCand } = await supabaseAdmin
+        .from('candidates')
+        .select('row_id')
+        .in('row_id', ids);
 
-    return NextResponse.json({ ok: true, done: d, total: t, ratio });
+      if (anyCand?.length) {
+        const set = new Set(anyCand.map((c) => c.row_id));
+        done = [...set].length;
+      }
+    }
+
+    const total = totalCount ?? 0;
+    const ratio = total ? Math.min(1, done / total) : 0;
+
+    return NextResponse.json({ ok: true, total, done, ratio });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, error: e?.message || 'progress_failed' }, { status: 500 });
+    return NextResponse.json({ ok: false, error: e?.message ?? 'progress_failed' }, { status: 500 });
   }
 }
