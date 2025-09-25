@@ -1,19 +1,15 @@
 // app/api/session/[id]/whoami/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
 import { verifyToken } from '@/lib/auth';
+import { ParamCtx, getParam, getToken } from '@/lib/route15';
 
-export async function GET(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> } // ✅ Next 15: Promise 형태
-) {
-  const { id: sessionId } = await context.params; // ✅ await 필요
+export async function GET(req: NextRequest, context: ParamCtx<'id'>) {
+  const sessionId = await getParam(context, 'id');
+  const token = await getToken('s_token'); // ✅
 
-  const token = cookies().get('s_token')?.value; // ✅ cookies()는 동기
   const payload = verifyToken(token);
-
   if (!payload || payload.session_id !== sessionId) {
-    return NextResponse.json({ ok: true, session_id: null });
+    return NextResponse.json({ ok: false, session_id: null });
   }
   return NextResponse.json({ ok: true, session_id: payload.session_id });
 }
